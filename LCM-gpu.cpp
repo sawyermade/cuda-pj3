@@ -22,8 +22,8 @@ __global__ void LCMKernel(igraph_t &graph, int n_vertices, int numThreads)
 int h_LCM(igraph_t &graph, int n_vertices, int numThreads) {
    //Define number of threads
    // int numThreads = 1024;
-   dim3 DimGrid(ceil(n/numThreads), 1, 1);   
-   if (n%numThreads) 
+   dim3 DimGrid(ceil(n_vertices/numThreads), 1, 1);   
+   if (n_vertices%numThreads) 
    {
 		DimGrid.x++;   
    }
@@ -33,14 +33,13 @@ int h_LCM(igraph_t &graph, int n_vertices, int numThreads) {
    memset(histo, 0, sizeof(long int)*n_vertices);
    long int d_histogram[n_vertices];
    cudaMalloc((void **)&d_histogram, sizeof(long int)*n_vertices);
-   // memset(d_histogram, 0, sizeof(long int)*n_vertices);
    cudaMemcpy(d_histogram, histo, sizeof(long int)*n_vertices, cudaMemcpyHostToDevice);
 
    //Call kernel function	
    LCMKernel<<<DimGrid,DimBlock>>>(graph, n_vertices, numThreads);
    
    //Copy computed value to host
-   cudaMemcpy(histo, d_histogram, sizeof(long int)*n_vertices,, cudaMemcpyDeviceToHost);
+   cudaMemcpy(histo, d_histogram, sizeof(long int)*n_vertices, cudaMemcpyDeviceToHost);
    return 0;
 }
 
@@ -79,7 +78,7 @@ int main(int argc, char** argv) {
 	int numThreads = 64;
 	//function
 	// linkage_covariance(graph);
-	h_LCM(&graph, n_vertices, numThreads);
+	h_LCM(graph, n_vertices, numThreads);
 
 	gettimeofday(&stop, NULL);
 	printf("took %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);

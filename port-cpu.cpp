@@ -8,9 +8,26 @@
 #include <cuda.h>
 #include <sys/time.h>
 
+igraph_neimode_t OUTALL;
+
 void linkage_covariance(igraph_t &graph);
 
 int main(int argc, char** argv) {
+	
+	//checks arguments
+	if(argc < 3) {
+
+		printf("\nToo few arguments. Usage: ./%s graphFile all/out\n", argv[0]);
+		return -1;
+	}
+
+	//graph direction out or all
+	if(!strcmp(argv[2], "out"))
+		OUTALL = IGRAPH_OUT;
+	else
+		OUTALL = IGRAPH_ALL;
+	
+	//timing stuff
 	struct timeval stop, start;
 	gettimeofday(&start, NULL);
 
@@ -50,15 +67,8 @@ void linkage_covariance(igraph_t &graph) {
 	igraph_vector_init(&neisVec2, 1);
 	igraph_vector_init(&compVec, 1);
 
-	//array of vectors
+	//array of vectors and initializes them
 	igraph_vector_t arrVec[n_vertices];
-	
-	// printf("\nTEST\n");
-	// igraph_neighbors(&graph, &neisVec1, 0, IGRAPH_OUT);
-	// igraph_neighbors(&graph, &neisVec2, 0, IGRAPH_OUT);
-	// igraph_vector_difference_sorted(&neisVec1, &neisVec2, &compVec);
-	// printf("\ndifferenc = %ld\n", (long int)igraph_vector_size(&compVec));
-
 	for(int j = 0; j < n_vertices; j++)
 	{
 		igraph_vector_init(&arrVec[j], 0);	
@@ -66,120 +76,61 @@ void linkage_covariance(igraph_t &graph) {
 					
 	//finds similar vertices
 	for(int i = 0; i < n_vertices; i++) {
-		
-		// //initializes i'th vector and sets to 0
-		// igraph_vector_init(&arrVec[i], 0);
 
 		//gets vertex i's neighbors
-		igraph_neighbors(&graph, &neisVec1, i, IGRAPH_OUT);
-		// printf("\nvertex %d adjacents = %ld\n", i+1, igraph_vector_size(&neisVec1));
-		// int nonZero = 0;
+		igraph_neighbors(&graph, &neisVec1, i, OUTALL);
+
 		//inner loop
 		for(int j = i+1; j < n_vertices; j++) {
 
-			// if(j < i) {
-				
-			// 	VECTOR(arrVec[i])[j] = VECTOR(arrVec[j])[i];
-			// 	continue;
-			// }
-
-			// if(i == j) {
-				
-			// 	VECTOR(arrVec[i])[j] = 0;
-			// 	continue;
-			// }
-
-
 			//gets j's neighbors and finds intersections of i and j
-			igraph_neighbors(&graph, &neisVec2, j, IGRAPH_OUT);
+			igraph_neighbors(&graph, &neisVec2, j, OUTALL);
 			igraph_vector_intersect_sorted(&neisVec1, &neisVec2, &compVec);
-			// printf("\nnumber in common v%d and v%d = %ld\n", i, j, igraph_vector_size(&compVec));
-			if (igraph_vector_size(&compVec) > 0)
-			{
-				// printf("\nnumber in common v%d and v%d = %ld\n", i, j, igraph_vector_size(&compVec));
-				//adds to array of vectors the number of similar neighbors
-				// VECTOR(arrVec[i])[nonZero] = igraph_vector_size(&compVec);
-				// nonZero++;
+
+			//if anything is similar
+			if (igraph_vector_size(&compVec) > 0) {
 
 				igraph_vector_push_back(&arrVec[i], igraph_vector_size(&compVec));
 				igraph_vector_push_back(&arrVec[j], igraph_vector_size(&compVec));
-				// printf("%d %d %ld", i, j, igraph_vector_size(&arrVec[j]));
-				// igraph_vector_push_back(&arrVec[i], igraph_vector_size(&compVec));
-				// printf("%d %d %ld", i, j, igraph_vector_size(&arrVec[j]));
-				// if (igraph_vector_size(&arrVec[j]) == 0)
-				// {
-				// 	igraph_vector_init(&arrVec[j], 0);
-				// }
-				
-				// if(i == 0)
-				// 	printf("\nv0 and v%d in common = %ld\n", j, (long int)VECTOR(arrVec[i])[j]);
 			}
 		}
-		// printf("%d - %d", i, nonZero);
 	}
 
+	//histogram and count vars
 	long int histo[n_vertices];
 	memset(histo, 0, sizeof(long int)*n_vertices);
 	int count = 0, countMax = -1;
 
+	//builds histogram
 	for(int i = 0; i < n_vertices; i++) {
+		
+		//sets count to 0 and sorts vector i
 		count = 0;
 		igraph_vector_sort(&arrVec[i]);
-		printf("%d:\n", i);
-		for(int k = 0; k< igraph_vector_size(&arrVec[i]); k++)
-		{
-			printf("%ld-", (long int)VECTOR(arrVec[i])[k]);
-		}
-		printf("\n");
+
 		for(int j = 0; j < n_vertices; j++) {
+			
+			//if not the same, continues
 			if(igraph_vector_size(&arrVec[i]) != igraph_vector_size(&arrVec[j]))
 				continue;
-			// igraph_vector_init(&compVec, 1);
 
-			// printf("\n");
+			//
 			igraph_vector_sort(&arrVec[j]);
-			igraph_vector_difference_sorted(&arrVec[i], &arrVec[j], &compVec);
-			
-			// if ((i == 17 && j == 19) || (i == 19 && j == 17))
-			// {
-			// 	printf("%d - %d \n", i, j);
-			// 	printf("%d:\n", i);
-			// 	for(int k = 0; k< igraph_vector_size(&arrVec[i]); k++)
-			// 	{
-			// 		printf("%ld-", (long int)VECTOR(arrVec[i])[k]);
-			// 	}
-			// 	printf("\n%d:\n", j);
-			// 	for(int k = 0; k< igraph_vector_size(&arrVec[j]); k++)
-			// 	{
-			// 		printf("%ld-", (long int)VECTOR(arrVec[j])[k]);
-			// 	}
-			// 	printf("\n-----------------\n");
-			// }
 				
-			// if(igraph_vector_size(&compVec) == 0)
+			//increases count if vector i and j are the same
 			if(igraph_vector_all_e(&arrVec[i], &arrVec[j]))
-			{				
-				// for(int k = 0; k< igraph_vector_size(&arrVec[j]); k++)
-				// {
-				// 	printf("%ld-", (long int)VECTOR(arrVec[j])[k]);
-				// }
-				// printf("\n%d == %d\n", i, j);
 				count++;
-			}
-			// if(countMax < count)
-			// countMax = count;
-			// if (count == 1)
-			// 	printf("\n%d - %d\n", i, count);
-			// histo[count]++;
 		}
 
+		//finds max count
 		if(countMax < count)
 			countMax = count;
-		// if (count == 1)
-			// printf("\n%d - %d\n", i, count);
+		
+		//increments histogram
 		histo[count]++;
 	}
 
+	//prints histogram
 	for(int i = 1; i <= countMax; i++) {
 		if ((long) (histo[i] / i) > 0)
 			printf("%d    %ld\n", i, (long) (histo[i] / i));

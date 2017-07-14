@@ -71,7 +71,7 @@ void linkage_covariance(igraph_t &graph) {
 		// igraph_vector_init(&arrVec[i], 0);
 
 		//gets vertex i's neighbors
-		igraph_neighbors(&graph, &neisVec1, i, IGRAPH_ALL);
+		igraph_neighbors(&graph, &neisVec1, i, IGRAPH_OUT);
 		// printf("\nvertex %d adjacents = %ld\n", i+1, igraph_vector_size(&neisVec1));
 		// int nonZero = 0;
 		//inner loop
@@ -91,7 +91,7 @@ void linkage_covariance(igraph_t &graph) {
 
 
 			//gets j's neighbors and finds intersections of i and j
-			igraph_neighbors(&graph, &neisVec2, j, IGRAPH_ALL);
+			igraph_neighbors(&graph, &neisVec2, j, IGRAPH_OUT);
 			igraph_vector_intersect_sorted(&neisVec1, &neisVec2, &compVec);
 			// printf("\nnumber in common v%d and v%d = %ld\n", i, j, igraph_vector_size(&compVec));
 			if (igraph_vector_size(&compVec) > 0)
@@ -125,12 +125,12 @@ void linkage_covariance(igraph_t &graph) {
 	for(int i = 0; i < n_vertices; i++) {
 		count = 0;
 		igraph_vector_sort(&arrVec[i]);
-		// printf("%d:\n", i);
-		// for(int k = 0; k< igraph_vector_size(&arrVec[i]); k++)
-		// {
-		// 	printf("%ld-", (long int)VECTOR(arrVec[i])[k]);
-		// }
-		// printf("\n");
+		printf("%d:\n", i);
+		for(int k = 0; k< igraph_vector_size(&arrVec[i]); k++)
+		{
+			printf("%ld-", (long int)VECTOR(arrVec[i])[k]);
+		}
+		printf("\n");
 		for(int j = 0; j < n_vertices; j++) {
 			if(igraph_vector_size(&arrVec[i]) != igraph_vector_size(&arrVec[j]))
 				continue;

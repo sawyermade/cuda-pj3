@@ -1,21 +1,21 @@
 CC=nvcc
-CFLAGS=-g -std=c++11 `pkg-config --cflags igraph`
+CFLAGS=-std=c++11 `pkg-config --cflags igraph`
 INC=
 LIB=`pkg-config --libs igraph`
 BIN=
-SRC=port-cpu.cpp
+SRC=LCM-gpu.cu
 OBJ=$(SRC:.cpp=.o)
-EXEC=pj3
-LDFLAGS=
+EXEC=pj3gpu
+NVFLAGS=-arch=sm_30
 
 
 all: $(EXEC)
 
 $(EXEC): $(OBJ)
-	$(CC) $(CLFAGS) $(INC) -o $@ $^ $(LIB)
+	$(CC) $(CLFAGS) $(NVFLAGS) $(INC) -o $@ $^ $(LIB)
 	
-.cpp.o:
-	$(CC) $(CFLAGS) $(INC) -c -o $@ $^
+# .cpp.o:
+# 	$(CC) $(CFLAGS) $(INC) -c -o $@ $^
 
 clean:
-	rm -f $(OBJ) $(EXEC)
+	rm -f $(EXEC)

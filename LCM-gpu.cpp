@@ -12,10 +12,10 @@ void linkage_covariance(igraph_t &graph);
 igraph_neimode_t OUTALL;
 
 
-__global__ void SDHKernel(atom *d_atom_list, bucket *d_histogram, int n, int n_res, int num_buckets) 
+__global__ void LCMKernel(igraph_t &graph, int n_vertices, int numThreads) 
 {     	
 	int i = threadIdx.x + blockDim.x * blockIdx.x;    
-	printf("HI from thread %d", i);
+	printf("HI from thread %d\n", i);
 }
 
 
@@ -40,7 +40,7 @@ int h_LCM(igraph_t &graph, int n_vertices, int numThreads) {
    LCMKernel<<<DimGrid,DimBlock>>>(graph, n_vertices, numThreads);
    
    //Copy computed value to host
-   cudaMemcpy(histo, d_histogram, sizeof(bucket)*num_buckets, cudaMemcpyDeviceToHost);
+   cudaMemcpy(histo, d_histogram, sizeof(long int)*n_vertices,, cudaMemcpyDeviceToHost);
    return 0;
 }
 
@@ -74,9 +74,13 @@ int main(int argc, char** argv) {
 
 	//builds graph from file
 	igraph_read_graph_ncol(&graph, inputFile, NULL, true, IGRAPH_ADD_WEIGHTS_NO, IGRAPH_DIRECTED);
+	int n_vertices = igraph_vcount(&graph);
 
+	int numThreads = 64;
 	//function
-	linkage_covariance(graph);
+	// linkage_covariance(graph);
+	h_LCM(&graph, n_vertices, numThreads);
+
 	gettimeofday(&stop, NULL);
 	printf("took %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
 	return 0;

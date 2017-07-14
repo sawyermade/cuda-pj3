@@ -1,4 +1,4 @@
-CC=nvcc
+CC=gcc
 CFLAGS=-g -std=c++11 `pkg-config --cflags igraph`
 INC=
 LIB=`pkg-config --libs igraph`

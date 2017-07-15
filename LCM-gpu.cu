@@ -40,7 +40,7 @@ void freeArray(Array *a) {
 //GLOBAL VARS
 igraph_neimode_t OUTALL;
 
-//KERNELS
+//KERNELS & PREP
 __global__ void TEST(int n, float* x, float* y);
 __global__ void LCM_Kernel(igraph_t d_graph, igraph_vector_t *d_arrVec, int n_vertices, igraph_neimode_t OUTALL);
 
@@ -102,6 +102,7 @@ int main(int argc, char** argv) {
 	return 0;
 }
 
+<<<<<<< HEAD
 int compare (const void * a, const void * b)
 {
   return ( *(int*)a - *(int*)b );
@@ -370,6 +371,8 @@ __global__ void LCM_Kernel(igraph_t d_graph, igraph_vector_t *d_arrVec, int n_ve
 }
 */
 
+=======
+>>>>>>> f538c2de2d0f2352215bf4fb9ab1bf45687b5357
 //function
 void linkage_covariance(igraph_t &graph) {
 
@@ -453,4 +456,35 @@ void checkCudaError(cudaError_t e, const char* in) {
 		printf("CUDA Error: %s, %s \n", in, cudaGetErrorString(e));
 		exit(EXIT_FAILURE);
 	}
+}
+
+//TEST PREP & KERNEL
+void TEST_PREP() {
+	int n = 100;
+	float *x, *y, *d_x, *d_y;
+	x = (float*)malloc(n*sizeof(float));
+	y = (float*)malloc(n*sizeof(float));
+
+	for(int i = 0; i < n; i++) {
+		x[i] = 1.0f;
+		y[i] = 2.0f;
+	}
+
+	checkCudaError(cudaMalloc((void**)&d_x, n*sizeof(float)), "Malloc Error");
+	cudaMalloc((void**)&d_y, n*sizeof(float));
+	cudaMemcpy(d_x, x, n*sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_y, y, n*sizeof(float), cudaMemcpyHostToDevice);
+	
+	TEST<<<1,1>>>(n, d_x, d_y);
+	checkCudaError(cudaGetLastError(), "Checking Last Error, Kernel Launch");
+	
+	cudaMemcpy(y, d_y, n*sizeof(float), cudaMemcpyDeviceToHost);
+
+	for(int i = 0; i < n; i++)
+		printf("%f\n", y[i]);
+}
+__global__ void TEST(int n, float* x, float* y) {
+
+	for(int i = 0; i < n; i++)
+		y[i] += x[i];
 }

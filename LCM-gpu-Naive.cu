@@ -8,6 +8,8 @@
 #include <iostream>
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 
 //GLOBAL VARS
 igraph_neimode_t OUTALL;
@@ -135,8 +137,8 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 		}
 		if(equal) {
 			atomicAdd((unsigned long long int*)&d_hist[row],1);
-			if(row2 == 0 && row == 0)
-				printf("\nTEST hist(%d) = %d\n", row, d_hist[row]);
+			//if(row2 == 0 && row == 0)
+				//printf("\nTEST hist(%d) = %d\n", row, d_hist[row]);
 		}
 	}
 }
@@ -184,15 +186,15 @@ void Naive_Prep(igraph_t &graph) {
 	cudaMemset(d_hist, 0, sizeof(int)*hsize);
 	memset(hist, 0, sizeof(int)*hsize);
 
-	// dim3 threads(128);
+	// dim3 threads(1024);
 	// dim3 grid(ceil((float)n_vertices/threads.x));
-	Naive<<<63, 32>>>(d_matrix, d_result, n_vertices);
-	Naive_Hist<<<63, 32>>>(d_result, d_hist, n_vertices);
+	Naive<<<n_vertices, 1024>>>(d_matrix, d_result, n_vertices);
+	Naive_Hist<<<n_vertices, 1024>>>(d_result, d_hist, n_vertices);
 	
 	cudaMemcpy(hist, d_hist, sizeof(int)*hsize, cudaMemcpyDeviceToHost);
 	cudaDeviceSynchronize();
-	for(int i = 0; i < hsize; i++)
-		printf("%d    %d\n", i, hist[i]);
+	// for(int i = 0; i < hsize; i++)
+	// 	printf("%d    %d\n", i, hist[i]);
 
 	// for(int i = 1; i < hsize; i++) {
 	// 	if ((hist[i] / i) > 0)

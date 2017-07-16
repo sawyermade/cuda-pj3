@@ -40,8 +40,11 @@ int main(int argc, char** argv) {
 	//graph direction out or all
 	if(!strcmp(argv[2], "out"))
 		OUTALL = IGRAPH_OUT;
-	else
+	else if(!strcmp(argv[2], "all"))
 		OUTALL = IGRAPH_ALL;
+	else {
+		printf("\nInvalid Graph Direction. Use out or all.\nUsage: ./%s graphFile all/out\n", argv[0]);
+	}
 	
 	struct timeval stop, start;
 	gettimeofday(&start, NULL);

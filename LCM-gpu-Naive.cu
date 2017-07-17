@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
 	}
 	
 	struct timeval stop, start;
-	gettimeofday(&start, NULL);
+	
 
 	//opens graph file passed as 1st argument
 	FILE *inputFile;
@@ -63,13 +63,17 @@ int main(int argc, char** argv) {
 	//builds graph from file
 	igraph_read_graph_ncol(&graph, inputFile, NULL, true, IGRAPH_ADD_WEIGHTS_NO, IGRAPH_DIRECTED);
 
-	//TEST_PREP();
+	
 	//function
+	gettimeofday(&start, NULL);
 	//linkage_covariance(graph);
+	gettimeofday(&stop, NULL);
+	
+
 	Naive_Prep(graph);
 	//Naive_Test();
-
-	gettimeofday(&stop, NULL);
+	//TEST_PREP();
+	
 	printf("took %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
 	return 0;
 }
@@ -96,22 +100,23 @@ __global__ void Naive(int* d_matrix, int* d_result, int n_vertices) {
 		for(int j = 0; j < n_vertices; j++) {
 
 			cval += d_matrix[row*n_vertices + j] * d_matrix[n_vertices*j + col];
-			// if(row == 0 && col == 0)
+			// if(row == 0)
 			// printf("cval(%d,%d) = %d x = %d y = %d\n", row, col, cval, d_matrix[row*n_vertices + j], d_matrix[n_vertices*j + col]);
 		}
+		// if(row == 1)
+		// 	printf("\ncval(%d,%d) = %d", row, i, cval);
 
 		// if(row == 1 && col == 0)
 		// 	printf("\ncval(0,1) = %d\n", cval);
 
-		d_result[row*blockDim.x + col] = cval;
+		d_result[row*n_vertices + i] = cval;
 	}
 	__syncthreads();
 
 	if(col == 0)
-		thrust::sort(thrust::seq, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
-	// if(col == 0 && row == 30) {
-	// 	//thrust::sort(thrust::seq, d_result, d_result + n_vertices);
-	// 	//thrust::sort(thrust::seq, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
+		thrust::sort(thrust::device, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
+	// if(col == 0 && row == 62) {
+	// 	//thrust::sort(thrust::device, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
 	// 	printf("\n");
 	// 	for(int i = 0; i < n_vertices; i++)
 	// 		printf("%d ", d_result[row*n_vertices + i]);
@@ -123,12 +128,16 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 	int row = blockIdx.x;
 	int row2 = threadIdx.x;
 	bool equal;
+	__shared__ int count;
+
+	if(row2 == 0)
+		count = 0;
+	__syncthreads();
 
 	if(row < n_vertices && row2 < n_vertices)
 	for(int i = row2; i < n_vertices; i += blockDim.x) {
 
 		equal = false;
-
 		for(int j = 0; j < n_vertices; j++) {
 
 			if(d_result[row*n_vertices +j] == d_result[i*n_vertices + j])
@@ -138,12 +147,36 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 				break;
 			}
 		}
+
+
 		if(equal) {
-			atomicAdd((unsigned long long int*)&d_hist[row],1);
+			//atomicAdd((unsigned long long int*)&d_hist[row],1);
 			//if(row2 == 0 && row == 0)
 				//printf("\nTEST hist(%d) = %d\n", row, d_hist[row]);
+			//++count;
+			atomicAdd(&count, 1);
 		}
+
 	}
+	__syncthreads();
+
+
+	if(row < n_vertices && row2 == 0 && count > 0)
+		atomicAdd(&d_hist[count], 1);
+		
+
+
+
+	// if(row < n_vertices && row2 < n_vertices)
+	// 	atomicAdd(&d_hist[row],count);
+	
+	//__syncthreads();
+
+	// if(row2 == 0 && row < n_vertices) {
+
+	// 	printf("\nhist(%d) = %d", row, d_hist[row]);
+	// }
+	// __syncthreads();
 }
 
 void Naive_Prep(igraph_t &graph) {
@@ -169,6 +202,14 @@ void Naive_Prep(igraph_t &graph) {
 		}
 	}
 
+	// for(int i = 0; i < n_vertices; i++) {
+	// 	printf("\n");
+	// 	for(int j = 0; j < n_vertices; j++) {
+	// 		printf("%d ", matrix[i*n_vertices+j]);
+	// 	}
+	// }
+	// printf("\n");
+
 	// printf("\n");
 	// for(int i = 0; i < n_vertices; i++)
 	// 	printf("%d ", matrix[i]);
@@ -178,8 +219,13 @@ void Naive_Prep(igraph_t &graph) {
 	// 	printf("%d ", matrix[i*n_vertices+1]);
 	// printf("\n");
 	//CUDA SHIT
-	int hsize = n_vertices;
-	int *d_matrix, *d_result, hist[hsize], *d_hist;
+	int hsize = 64;
+	int *hist, *d_hist;
+	hist = (int*)malloc(sizeof(int)*hsize);
+
+	
+	int *d_matrix, *d_result;
+	
 	cudaMalloc((void**)&d_matrix, sizeof(int)*n_vertices*n_vertices);
 	cudaMalloc((void**)&d_result, sizeof(int)*n_vertices*n_vertices);
 	cudaMalloc((void**)&d_hist, sizeof(int)*hsize);
@@ -187,29 +233,49 @@ void Naive_Prep(igraph_t &graph) {
 	cudaMemcpy(d_matrix, matrix, sizeof(int)*n_vertices*n_vertices, cudaMemcpyHostToDevice);
 	cudaMemset(d_result, 0, sizeof(int)*n_vertices*n_vertices);
 	cudaMemset(d_hist, 0, sizeof(int)*hsize);
-	memset(hist, 0, sizeof(int)*hsize);
+	//memset(hist, 0, sizeof(int)*hsize);
+
+	//kernel execution time crap
+	float elapsedTime;
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
 
 	// dim3 threads(1024);
 	// dim3 grid(ceil((float)n_vertices/threads.x));
 	Naive<<<n_vertices, 1024>>>(d_matrix, d_result, n_vertices);
+	//cudaDeviceSynchronize();
 	Naive_Hist<<<n_vertices, 1024>>>(d_result, d_hist, n_vertices);
+	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*hsize, cudaMemcpyDeviceToHost), "D_HIST TO HOST");
 	
-	cudaMemcpy(hist, d_hist, sizeof(int)*hsize, cudaMemcpyDeviceToHost);
-	cudaDeviceSynchronize();
+	//kernel execution stop
+	//cudaDeviceSynchronize();
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(start);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cudaEventDestroy(start);
+	cudaEventDestroy(stop);
+	// printf("\n");
 	// for(int i = 0; i < hsize; i++)
-	// 	printf("%d    %d\n", i, hist[i]);
+	// 	printf("%d ", hist[i]);
+	// printf("\n");
 
-	// for(int i = 1; i < hsize; i++) {
-	// 	if ((hist[i] / i) > 0)
-	// 		printf("%d    %d\n", i, (hist[i] / i));
-	// }
+	for(int i = 1; i < hsize; i++) {
+		if ((hist[i] / i) > 0)
+			printf("%d    %d\n", i, (hist[i] / i));
+	}
+
+	printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
+	printf("\n******** Total Running Time of Kernel = %0.5f sec *******\n", elapsedTime/1000);
 }
 
 void Naive_Test() {
 
 	int test[25];
-	for(int i = 1; i <= 25; i++){
-		test[i-1] = i;
+	for(int i = 0; i < 25; i++){
+		test[i] = i+1;
 		//printf("%d\n", test[i-1]);
 	}
 

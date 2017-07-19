@@ -27,6 +27,8 @@ void checkCudaError(cudaError_t e, const char* in);
 
 //FUNCTIONS
 void linkage_covariance(igraph_t &graph);
+void LCM_cpu_baseline(igraph_t &graph);
+int compare(const void* a, const void* b);
 
 //main
 int main(int argc, char** argv) {
@@ -67,10 +69,11 @@ int main(int argc, char** argv) {
 	//function
 	gettimeofday(&start, NULL);
 	//linkage_covariance(graph);
+	LCM_cpu_baseline(graph);
 	gettimeofday(&stop, NULL);
 	
 
-	Naive_Prep(graph);
+	//Naive_Prep(graph);
 	//Naive_Test();
 	//TEST_PREP();
 	
@@ -113,7 +116,7 @@ __global__ void Naive(int* d_matrix, int* d_result, int n_vertices) {
 	}
 	__syncthreads();
 
-	if(col == 0)
+	if(col == 0 && row < n_vertices)
 		thrust::sort(thrust::device, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
 	// if(col == 0 && row == 62) {
 	// 	//thrust::sort(thrust::device, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
@@ -158,6 +161,7 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 		}
 
 	}
+	//printf("\ncount = %d", count);
 	__syncthreads();
 
 
@@ -299,6 +303,120 @@ void Naive_Test() {
 }
 
 //function
+int compare(const void* a, const void* b) {
+	return ( *(int*)a - *(int*)b );
+}
+
+void LCM_cpu_baseline(igraph_t &graph) {
+
+
+
+	int n_vertices = igraph_vcount(&graph);
+	int *matrix = (int *)malloc(n_vertices*n_vertices*sizeof(int));
+	memset(matrix, 0, sizeof(int)*n_vertices*n_vertices);
+
+	int vsize;
+	igraph_vector_t vec;
+	igraph_vector_init(&vec, 0);
+
+	//builds adj matrix
+	for(int i = 0; i < n_vertices; i++) {
+
+		igraph_neighbors(&graph, &vec, i, OUTALL);
+		vsize = igraph_vector_size(&vec);
+
+		for(int j = 0; j < vsize; j++) {
+
+			matrix[i*n_vertices + (int)VECTOR(vec)[j]] = 1;
+		}
+	}
+
+	//multiplies it against itself
+	int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
+	memset(result, 0, sizeof(int)*n_vertices*n_vertices);
+	int cval;
+
+	for(int i = 0; i < n_vertices; i++) {
+
+		for(int j = i+1; j < n_vertices; j++) {
+
+			cval = 0;
+
+			for(int k = 0; k < n_vertices; k++) {
+
+				cval += matrix[i*n_vertices + k] * matrix[k*n_vertices + j];
+			}
+
+			result[i*n_vertices + j] = cval;
+			result[j*n_vertices + i] = cval;
+		}
+
+		qsort(&result[i*n_vertices], n_vertices + 0, sizeof(int), compare);
+	}
+
+	//multiplies it against itself
+	// int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
+	// memset(result, 0, sizeof(int)*n_vertices*n_vertices);
+	// int cval;
+
+	// for(int i = 0; i < n_vertices; i++) {
+
+	// 	for(int j = 0; j < n_vertices; j++) {
+
+	// 		cval = 0;
+
+	// 		for(int k = 0; k < n_vertices; k++) {
+
+	// 			cval += matrix[i*n_vertices + k] * matrix[k*n_vertices + j];
+	// 		}
+
+	// 		result[i*n_vertices + j] = cval;
+	// 	}
+
+	// 	qsort(&result[i*n_vertices], n_vertices +1, sizeof(int), compare);
+	// }
+
+	//histogram
+	bool equal;
+	int count, countMax = -1;
+	int *hist = (int*)malloc(sizeof(int) * n_vertices);
+	memset(hist, 0, sizeof(int)*n_vertices);
+
+	for(int i = 0; i < n_vertices; i++) {
+
+		count = 0;
+
+		for(int j = 0; j < n_vertices; j++) {
+
+			equal = false;
+
+			for(int k = 0; k < n_vertices; k++) {
+
+				if(result[i*n_vertices + k] == result[j*n_vertices + k])
+					equal = true;
+				else {
+					equal = false;
+					break;
+				}
+			}
+
+			if(equal)
+				++count;
+		}
+		if(countMax < count)
+				countMax = count;
+
+		if(count > 0)
+			++hist[count];
+	}
+
+	//prints results
+	for(int i = 1; i <= countMax; i++) {
+		if ((long) (hist[i] / i) > 0)
+			printf("%d    %ld\n", i, (long) (hist[i] / i));
+	}
+}
+
 void linkage_covariance(igraph_t &graph) {
 
 	//gets number of vertices

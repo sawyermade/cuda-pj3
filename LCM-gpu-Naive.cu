@@ -354,7 +354,7 @@ void LCM_cpu_baseline(igraph_t &graph) {
 		qsort(&result[i*n_vertices], n_vertices + 0, sizeof(int), compare);
 	}
 
-	//multiplies it against itself
+	//multiplies it against itself, REALL SLOW CODE LOL
 	// int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
 	// memset(result, 0, sizeof(int)*n_vertices*n_vertices);
 	// int cval;

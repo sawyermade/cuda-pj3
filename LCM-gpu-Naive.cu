@@ -69,15 +69,15 @@ int main(int argc, char** argv) {
 	//function
 	gettimeofday(&start, NULL);
 	//linkage_covariance(graph);
-	LCM_cpu_baseline(graph);
+	//LCM_cpu_baseline(graph);
 	gettimeofday(&stop, NULL);
 	
 
-	//Naive_Prep(graph);
+	Naive_Prep(graph);
 	//Naive_Test();
 	//TEST_PREP();
 	
-	printf("took %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
+	printf("CPU Running Time: %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
 	return 0;
 }
 
@@ -87,30 +87,19 @@ __global__ void Naive(int* d_matrix, int* d_result, int n_vertices) {
 	int col = threadIdx.x;
 	int cval;
 
-	
-
 	if(row < n_vertices && col < n_vertices)
 	for(int i = col; i < n_vertices; i += blockDim.x) {
 
-		if(row == col) {
-			d_result[row*blockDim.x + col] = 0;
+		if(row == i) {
+			d_result[row*n_vertices + i] = 0;
 			continue;
 		}
 
 		cval = 0;
 
 
-		for(int j = 0; j < n_vertices; j++) {
-
-			cval += d_matrix[row*n_vertices + j] * d_matrix[n_vertices*j + col];
-			// if(row == 0)
-			// printf("cval(%d,%d) = %d x = %d y = %d\n", row, col, cval, d_matrix[row*n_vertices + j], d_matrix[n_vertices*j + col]);
-		}
-		// if(row == 1)
-		// 	printf("\ncval(%d,%d) = %d", row, i, cval);
-
-		// if(row == 1 && col == 0)
-		// 	printf("\ncval(0,1) = %d\n", cval);
+		for(int j = 0; j < n_vertices; j++)
+			cval += d_matrix[row*n_vertices + j] * d_matrix[n_vertices*j + i];
 
 		d_result[row*n_vertices + i] = cval;
 	}
@@ -118,13 +107,6 @@ __global__ void Naive(int* d_matrix, int* d_result, int n_vertices) {
 
 	if(col == 0 && row < n_vertices)
 		thrust::sort(thrust::device, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
-	// if(col == 0 && row == 62) {
-	// 	//thrust::sort(thrust::device, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
-	// 	printf("\n");
-	// 	for(int i = 0; i < n_vertices; i++)
-	// 		printf("%d ", d_result[row*n_vertices + i]);
-	// 	printf("\n");
-	// }
 }
 __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 
@@ -152,14 +134,8 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 		}
 
 
-		if(equal) {
-			//atomicAdd((unsigned long long int*)&d_hist[row],1);
-			//if(row2 == 0 && row == 0)
-				//printf("\nTEST hist(%d) = %d\n", row, d_hist[row]);
-			//++count;
+		if(equal)
 			atomicAdd(&count, 1);
-		}
-
 	}
 	//printf("\ncount = %d", count);
 	__syncthreads();
@@ -167,20 +143,6 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 
 	if(row < n_vertices && row2 == 0 && count > 0)
 		atomicAdd(&d_hist[count], 1);
-		
-
-
-
-	// if(row < n_vertices && row2 < n_vertices)
-	// 	atomicAdd(&d_hist[row],count);
-	
-	//__syncthreads();
-
-	// if(row2 == 0 && row < n_vertices) {
-
-	// 	printf("\nhist(%d) = %d", row, d_hist[row]);
-	// }
-	// __syncthreads();
 }
 
 void Naive_Prep(igraph_t &graph) {
@@ -206,22 +168,6 @@ void Naive_Prep(igraph_t &graph) {
 		}
 	}
 
-	// for(int i = 0; i < n_vertices; i++) {
-	// 	printf("\n");
-	// 	for(int j = 0; j < n_vertices; j++) {
-	// 		printf("%d ", matrix[i*n_vertices+j]);
-	// 	}
-	// }
-	// printf("\n");
-
-	// printf("\n");
-	// for(int i = 0; i < n_vertices; i++)
-	// 	printf("%d ", matrix[i]);
-
-	// printf("\n");
-	// for(int i = 0; i < n_vertices; i++)
-	// 	printf("%d ", matrix[i*n_vertices+1]);
-	// printf("\n");
 	//CUDA SHIT
 	int hsize = 64;
 	int *hist, *d_hist;
@@ -248,24 +194,21 @@ void Naive_Prep(igraph_t &graph) {
 
 	// dim3 threads(1024);
 	// dim3 grid(ceil((float)n_vertices/threads.x));
+	//if(n_vertices < 1024)
+
 	Naive<<<n_vertices, 1024>>>(d_matrix, d_result, n_vertices);
-	//cudaDeviceSynchronize();
 	Naive_Hist<<<n_vertices, 1024>>>(d_result, d_hist, n_vertices);
 	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*hsize, cudaMemcpyDeviceToHost), "D_HIST TO HOST");
 	
 	//kernel execution stop
-	//cudaDeviceSynchronize();
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(start);
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&elapsedTime, start, stop);
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
-	// printf("\n");
-	// for(int i = 0; i < hsize; i++)
-	// 	printf("%d ", hist[i]);
-	// printf("\n");
 
+	printf("\nGPU HISTOGRAM\n");
 	for(int i = 1; i < hsize; i++) {
 		if ((hist[i] / i) > 0)
 			printf("%d    %d\n", i, (hist[i] / i));
@@ -411,6 +354,7 @@ void LCM_cpu_baseline(igraph_t &graph) {
 	}
 
 	//prints results
+	printf("\nCPU HISTOGRAM\n");
 	for(int i = 1; i <= countMax; i++) {
 		if ((long) (hist[i] / i) > 0)
 			printf("%d    %ld\n", i, (long) (hist[i] / i));

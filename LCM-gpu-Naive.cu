@@ -21,7 +21,7 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices);
 
 //TEST KERNELS & PREP
 void TEST_PREP(igraph_t &graph);
-__global__ void TEST(int* test);
+__global__ void TEST(int* adj, int* lcm, int* sizes, int n);
 
 //CUDA ERROR
 void checkCudaError(cudaError_t e, const char* in);
@@ -133,7 +133,7 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 	int row2 = threadIdx.x;
 	bool equal;
 
-	//shared count for whole block
+	//shared count for whole block/same vertice
 	__shared__ int count;
 
 	//one thread sets count to zero and syncsthreads.
@@ -170,9 +170,11 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 
 void Naive_Prep(igraph_t &graph) {
 
+	//creates adjacency matrix and gets num vertices
 	int *matrix, n_vertices = igraph_vcount(&graph);
 	long int vsize;
 	
+	//vertice adj vectors, intialized to size 0
 	igraph_vector_t vec;
 	igraph_vector_init(&vec, 0);
 	
@@ -180,11 +182,14 @@ void Naive_Prep(igraph_t &graph) {
 	matrix = (int *)malloc(n_vertices*n_vertices*sizeof(int));
 	memset(matrix, 0, sizeof(int)*n_vertices*n_vertices);
 
+	//builds adj matrix
 	for(int i = 0; i < n_vertices; i++) {
 		
+		//gets vertice i's neighbors and number of adjacencies
 		igraph_neighbors(&graph, &vec, i, OUTALL);
 		vsize = igraph_vector_size(&vec);
 
+		//puts ones in the adj matrix where they belong
 		for(int j = 0; j < vsize; j++) {
 
 			matrix[i*n_vertices + (int)VECTOR(vec)[j]] = 1;
@@ -195,14 +200,14 @@ void Naive_Prep(igraph_t &graph) {
 	int hsize = 64;
 	int *hist, *d_hist;
 	hist = (int*)malloc(sizeof(int)*hsize);
-
-	
-	int *d_matrix, *d_result;
-	
-	cudaMalloc((void**)&d_matrix, sizeof(int)*n_vertices*n_vertices);
-	cudaMalloc((void**)&d_result, sizeof(int)*n_vertices*n_vertices);
 	cudaMalloc((void**)&d_hist, sizeof(int)*hsize);
 
+	//creates 2 adjacency matrix graphs for device
+	int *d_matrix, *d_result;
+	cudaMalloc((void**)&d_matrix, sizeof(int)*n_vertices*n_vertices);
+	cudaMalloc((void**)&d_result, sizeof(int)*n_vertices*n_vertices);
+	
+	//copys adj matrix to device and sets device hist and result to zero
 	cudaMemcpy(d_matrix, matrix, sizeof(int)*n_vertices*n_vertices, cudaMemcpyHostToDevice);
 	cudaMemset(d_result, 0, sizeof(int)*n_vertices*n_vertices);
 	cudaMemset(d_hist, 0, sizeof(int)*hsize);
@@ -215,12 +220,11 @@ void Naive_Prep(igraph_t &graph) {
 	cudaEventCreate(&stop);
 	cudaEventRecord(start, 0);
 
-	// dim3 threads(1024);
-	// dim3 grid(ceil((float)n_vertices/threads.x));
-	//if(n_vertices < 1024)
-
+	//kernels for lcm and hist
 	Naive<<<n_vertices, 1024>>>(d_matrix, d_result, n_vertices);
 	Naive_Hist<<<n_vertices, 1024>>>(d_result, d_hist, n_vertices);
+	
+	//copies hist back to host
 	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*hsize, cudaMemcpyDeviceToHost), "D_HIST TO HOST");
 	
 	//kernel execution stop
@@ -231,15 +235,18 @@ void Naive_Prep(igraph_t &graph) {
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
 
+	//prints gpu histogram
 	printf("\nGPU HISTOGRAM\n");
 	for(int i = 1; i < hsize; i++) {
 		if ((hist[i] / i) > 0)
 			printf("%d    %d\n", i, (hist[i] / i));
 	}
 
+	//prints kernel running time
 	printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
 	printf("\n******** Total Running Time of Kernel = %0.5f sec *******\n", elapsedTime/1000);
 
+	//frees all the shit
 	free(matrix);
 	free(hist);
 	cudaFree(d_matrix);
@@ -252,50 +259,54 @@ int compare(const void* a, const void* b) {
 	return ( *(int*)a - *(int*)b );
 }
 
+//naive cpu version, slow and takes a shit load of host memory
+//uses adjacency matrix on cpu
 void LCM_cpu_baseline(igraph_t &graph) {
 
-
-
-	int n_vertices = igraph_vcount(&graph);
+	//gets num vertices and allocates, sets to zero adj matrix
+	int n_vertices = igraph_vcount(&graph), vsize;
 	int *matrix = (int *)malloc(n_vertices*n_vertices*sizeof(int));
 	memset(matrix, 0, sizeof(int)*n_vertices*n_vertices);
 
-	int vsize;
+	//graph vector and initializes it to zero
 	igraph_vector_t vec;
 	igraph_vector_init(&vec, 0);
 
 	//builds adj matrix
 	for(int i = 0; i < n_vertices; i++) {
 
+		//grabs neighbors and size
 		igraph_neighbors(&graph, &vec, i, OUTALL);
 		vsize = igraph_vector_size(&vec);
 
+		//adds ones where its adjacent
 		for(int j = 0; j < vsize; j++) {
 
 			matrix[i*n_vertices + (int)VECTOR(vec)[j]] = 1;
 		}
 	}
 
-	//multiplies it against itself
+	//result adj matrix set to zero
 	int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
 	memset(result, 0, sizeof(int)*n_vertices*n_vertices);
 	int cval;
 
+	//multiplies it against itself
 	for(int i = 0; i < n_vertices; i++) {
 
 		for(int j = i+1; j < n_vertices; j++) {
 
 			cval = 0;
 
-			for(int k = 0; k < n_vertices; k++) {
-
+			for(int k = 0; k < n_vertices; k++)
 				cval += matrix[i*n_vertices + k] * matrix[k*n_vertices + j];
-			}
 
+			//enters val and transposes
 			result[i*n_vertices + j] = cval;
 			result[j*n_vertices + i] = cval;
 		}
 
+		//sorts the vertice/row
 		qsort(&result[i*n_vertices], n_vertices + 0, sizeof(int), compare);
 	}
 
@@ -351,8 +362,7 @@ void LCM_cpu_baseline(igraph_t &graph) {
 		if(countMax < count)
 				countMax = count;
 
-		if(count > 0)
-			++hist[count];
+		++hist[count];
 	}
 
 	//prints results
@@ -362,6 +372,7 @@ void LCM_cpu_baseline(igraph_t &graph) {
 			printf("%d    %ld\n", i, (long) (hist[i] / i));
 	}
 
+	//frees shit
 	free(matrix);
 	free(result);
 	free(hist);
@@ -422,6 +433,8 @@ void linkage_covariance(igraph_t &graph) {
 
 		//checks for equality
 		for(int j = 0; j < n_vertices; j++) {
+			
+			//if they arent equal size, they arent equal
 			if(igraph_vector_size(&arrVec[i]) != igraph_vector_size(&arrVec[j]))
 				continue;
 
@@ -438,7 +451,7 @@ void linkage_covariance(igraph_t &graph) {
 			countMax = count;
 
 		//increments hist[count] where count is 
-		//identical with all other vectors including itself
+		//identical with all other vectors including itself, count should always be > 0
 		hist[count]++;
 	}
 
@@ -467,29 +480,76 @@ void TEST_PREP(igraph_t &graph) {
 	//num vertices
 	int n_vertices = igraph_vcount(&graph);
 
-	//2d adj list and size
-	int **adj2d = (int**)malloc(sizeof(int*)*n_vertices);
-	int *adjsize = (int*)malloc(sizeof(int)*n_vertices);
-	int totalsize = 0, vsize;
+	//1D adj list graphs and sizes
+	int *adj;
+	int *adjsizes = (int*)malloc(sizeof(int)*n_vertices);
+	int totalsize = 0;
 
 	//vector for single vertices adj list
 	igraph_vector_t neisVec;
 
-	//creates 2d adj list
+	//gets each vertex's number of neighbors and total neighbors
+	for(int i = 0; i < n_vertices; totalsize += adjsizes[i++]) {
+		
+		igraph_neighbors(&graph, &neisVec, i, OUTALL);
+		adjsizes[i] = igraph_vector_size(&neisVec);
+	}
+
+	//creats jagged & flattened to 1D adj list	
+	adj = (int*)malloc(sizeof(int)*totalsize);
+
+	//creates 1d adj list
 	for(int i = 0; i < n_vertices; i++) {
 
+		//gets neighbors and number of neighbors
 		igraph_neighbors(&graph, &neisVec, i, OUTALL);
-		vsize = igraph_vector_size(&neisVec);
 
-		adj2d[i] = (int*)malloc(sizeof(int)*vsize);
+		//loads in vertice i's adjancent neighbors
+		for(int j = 0; j < adjsizes[i]; j++) {
+			
+			if(i == 0)
+				adj[j] = (int)VECTOR(neisVec)[j];
 
-		for(int j = 0; j < n_vertices; j++) {
-
-
+			else
+				adj[i*adjsizes[i-1] + j] = (int)VECTOR(neisVec)[j];
 		}
 	}
-}
-__global__ void TEST(int* test) {
 
-	thrust::sort(thrust::seq, test, test + 13);
+	//device vars
+	int *d_adj, *d_lcm, *d_adjsizes;
+
+	//mallocs and copys
+	cudaMalloc((void**)&d_adj, sizeof(int)*totalsize);
+	cudaMalloc((void**)&d_lcm, sizeof(int)*totalsize);
+	cudaMalloc((void**)&d_adjsizes, sizeof(int)*n_vertices);
+
+	//copys adj list to device and initializes lcm to zero
+	cudaMemcpy(d_adj, adj, sizeof(int)*totalsize, cudaMemcpyHostToDevice);
+	cudaMemset(d_lcm, 0, sizeof(int)*totalsize);
+	cudaMemcpy(d_adjsizes, adjsizes, sizeof(int)*n_vertices, cudaMemcpyHostToDevice);
+	
+	//figures out threads per block
+	int threads;
+	if(n_vertices > 1024)
+		threads = 1024;
+	else
+		threads = n_vertices;
+
+	//kernel call
+	TEST<<<n_vertices, threads>>>(d_adj, d_lcm, d_adjsizes, n_vertices);
+}	
+
+//kernal
+__global__ void TEST(int* adj, int* lcm, int* sizes, int n) {
+
+	int vertex = blockIdx.x;
+	int vcomp = threadIdx.x;
+	int cval;
+
+	for(int i = vcomp; i < n; i += blockDim.x) {
+
+		//for(int j = 0; j < )
+	}
+
+	//thrust::sort(thrust::seq, test, test + 13);
 }

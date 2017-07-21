@@ -14,13 +14,14 @@
 //GLOBAL VARS
 igraph_neimode_t OUTALL;
 
-//KERNELS & PREP
-void Naive_Test();
+//NAIVE KERNELS & PREP
+void Naive_Prep(igraph_t &graph);
 __global__ void Naive(int* d_matrix, int* d_result, int n_vertices);
 __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices);
-void Naive_Prep(igraph_t &graph);
+
+//TEST KERNELS & PREP
+void TEST_PREP(igraph_t &graph);
 __global__ void TEST(int* test);
-void TEST_PREP();
 
 //CUDA ERROR
 void checkCudaError(cudaError_t e, const char* in);
@@ -48,6 +49,7 @@ int main(int argc, char** argv) {
 		printf("\nInvalid Graph Direction. Use out or all.\nUsage: ./%s graphFile all/out\n", argv[0]);
 	}
 	
+	//cpu timing shit
 	struct timeval stop, start;
 	
 
@@ -60,68 +62,90 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	
+	//graph var and builds graph from file
 	igraph_t graph;
-
-	//builds graph from file
 	igraph_read_graph_ncol(&graph, inputFile, NULL, true, IGRAPH_ADD_WEIGHTS_NO, IGRAPH_DIRECTED);
 
 	
-	//function
-	gettimeofday(&start, NULL);
-	//linkage_covariance(graph);
-	//LCM_cpu_baseline(graph);
-	gettimeofday(&stop, NULL);
-	
 
+	//cpu naive & needs tons of host memory
+	// gettimeofday(&start, NULL);
+	// LCM_cpu_baseline(graph);
+	// gettimeofday(&stop, NULL);
+	// printf("CPU Naive Running Time: %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
+
+	//cpu optimized
+	gettimeofday(&start, NULL);
+	linkage_covariance(graph);
+	gettimeofday(&stop, NULL);
+	printf("CPU Optimized Running Time: %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
+
+	//gpu naive
 	Naive_Prep(graph);
 	//Naive_Test();
 	//TEST_PREP();
 	
-	printf("CPU Running Time: %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
+	
 	return 0;
 }
 
+//uses adjaceny matrix, slow and takes a shit load of device memory, lots of zeros
 __global__ void Naive(int* d_matrix, int* d_result, int n_vertices) {
 
+	//each block takes care of a whole row
+	//columns to be compared to same row are threads
 	int row = blockIdx.x;
 	int col = threadIdx.x;
 	int cval;
 
+	//compares vertice blockIdx.x to all other vertices, increments by blockDim
 	if(row < n_vertices && col < n_vertices)
 	for(int i = col; i < n_vertices; i += blockDim.x) {
 
+		//sets graphs horizontal to 0
 		if(row == i) {
 			d_result[row*n_vertices + i] = 0;
 			continue;
 		}
 
+		//sets to zero
 		cval = 0;
 
-
+		//gets row x col
 		for(int j = 0; j < n_vertices; j++)
 			cval += d_matrix[row*n_vertices + j] * d_matrix[n_vertices*j + i];
 
+		//puts cval into graph
 		d_result[row*n_vertices + i] = cval;
 	}
+	
+	//syncs threads so new row is done and sorts it using thrust on thread 0
 	__syncthreads();
-
 	if(col == 0 && row < n_vertices)
 		thrust::sort(thrust::device, &d_result[row*n_vertices], &d_result[row*n_vertices] + n_vertices);
 }
+
+//builds histogram, lots of zeros
 __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 
+	//each block compares the same row to all others row2
 	int row = blockIdx.x;
 	int row2 = threadIdx.x;
 	bool equal;
+
+	//shared count for whole block
 	__shared__ int count;
 
+	//one thread sets count to zero and syncsthreads.
 	if(row2 == 0)
 		count = 0;
 	__syncthreads();
 
+	//checks equality to other vertices
 	if(row < n_vertices && row2 < n_vertices)
 	for(int i = row2; i < n_vertices; i += blockDim.x) {
 
+		//checks equality of vertices lcm
 		equal = false;
 		for(int j = 0; j < n_vertices; j++) {
 
@@ -133,14 +157,13 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 			}
 		}
 
-
+		//adds to count if vertices are equal
 		if(equal)
 			atomicAdd(&count, 1);
 	}
-	//printf("\ncount = %d", count);
+
+	//syncsthreads so count is done and increments hist[count]
 	__syncthreads();
-
-
 	if(row < n_vertices && row2 == 0 && count > 0)
 		atomicAdd(&d_hist[count], 1);
 }
@@ -216,36 +239,15 @@ void Naive_Prep(igraph_t &graph) {
 
 	printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
 	printf("\n******** Total Running Time of Kernel = %0.5f sec *******\n", elapsedTime/1000);
+
+	free(matrix);
+	free(hist);
+	cudaFree(d_matrix);
+	cudaFree(d_result);
+	cudaFree(d_hist);
 }
 
-void Naive_Test() {
-
-	int test[25];
-	for(int i = 0; i < 25; i++){
-		test[i] = i+1;
-		//printf("%d\n", test[i-1]);
-	}
-
-	int *d_test, *d_result, result[25];
-
-	cudaMalloc((void**)&d_test, sizeof(int)*25);
-	cudaMalloc((void**)&d_result, sizeof(int)*25);
-	cudaMemcpy(d_test, test, sizeof(int)*25, cudaMemcpyHostToDevice);
-	cudaMemset(d_result, 0, sizeof(int)*25);
-
-	Naive<<<5, 5>>>(d_test, d_result, 5);
-	cudaDeviceSynchronize();
-
-	cudaMemcpy(result, d_result, sizeof(int)*25, cudaMemcpyDeviceToHost);
-
-	for(int i = 0; i < 5; i++) {
-		printf("\n");
-		for(int j = 0; j < 5; j++)
-			printf("%d ", result[i*5 + j]);
-	}
-}
-
-//function
+//qsort compare function
 int compare(const void* a, const void* b) {
 	return ( *(int*)a - *(int*)b );
 }
@@ -354,11 +356,15 @@ void LCM_cpu_baseline(igraph_t &graph) {
 	}
 
 	//prints results
-	printf("\nCPU HISTOGRAM\n");
+	printf("\nCPU Naive Histogram\n");
 	for(int i = 1; i <= countMax; i++) {
 		if ((long) (hist[i] / i) > 0)
 			printf("%d    %ld\n", i, (long) (hist[i] / i));
 	}
+
+	free(matrix);
+	free(result);
+	free(hist);
 }
 
 void linkage_covariance(igraph_t &graph) {
@@ -372,67 +378,79 @@ void linkage_covariance(igraph_t &graph) {
 	igraph_vector_init(&neisVec2, 1);
 	igraph_vector_init(&compVec, 1);
 
-
+	//jagged 2d array holding lcm
 	igraph_vector_t arrVec[n_vertices];
 	
+	//initializes all the array of vectors to 0 size
 	for(int j = 0; j < n_vertices; j++)
-	{
 		igraph_vector_init(&arrVec[j], 0);
-	}
 					
 	//finds similar vertices
 	for(int i = 0; i < n_vertices; i++) {
 		
+		//grabs neighbors/adj vertices
 		igraph_neighbors(&graph, &neisVec1, i, OUTALL);
-		//inner loop
+		
+		//checks similaries with neighbors
 		for(int j = i+1; j < n_vertices; j++) {
 
+			//gets neighbors of next vertice and compares similarities using set intersection
 			igraph_neighbors(&graph, &neisVec2, j, OUTALL);
 			igraph_vector_intersect_sorted(&neisVec1, &neisVec2, &compVec);
-			if (igraph_vector_size(&compVec) > 0)
-			{
+
+			//pushes back for vertex i and transposes to j
+			if (igraph_vector_size(&compVec) > 0) {
+				
 				igraph_vector_push_back(&arrVec[i], igraph_vector_size(&compVec));
 				igraph_vector_push_back(&arrVec[j], igraph_vector_size(&compVec));
 			}
 		}
 	}
 
-	long int histo[n_vertices];
-	memset(histo, 0, sizeof(long int)*n_vertices);
+	//vars for the histogram
+	long int *hist;
+	hist = (long int*)malloc(sizeof(long int)*n_vertices);
+	memset(hist, 0, sizeof(long int)*n_vertices);
 	int count = 0, countMax = -1;
 
+	//calculates the histogram
 	for(int i = 0; i < n_vertices; i++) {
+		
+		//sets count to zero and sorts the vector
 		count = 0;
 		igraph_vector_sort(&arrVec[i]);
-		// printf("%d:\n", i);
-		// for(int k = 0; k< igraph_vector_size(&arrVec[i]); k++)
-		// {
-		// 	printf("%ld-", (long int)VECTOR(arrVec[i])[k]);
-		// }
-		// printf("\n");
+
+		//checks for equality
 		for(int j = 0; j < n_vertices; j++) {
 			if(igraph_vector_size(&arrVec[i]) != igraph_vector_size(&arrVec[j]))
 				continue;
 
+			//sorts other row we are comparing
 			igraph_vector_sort(&arrVec[j]);
 			
-			if(igraph_vector_all_e(&arrVec[i], &arrVec[j]))
-			{				
+			//if vectors are equal, increments count
+			if(igraph_vector_all_e(&arrVec[i], &arrVec[j]))				
 				count++;
-			}
 		}
 
+		//keep track of max count
 		if(countMax < count)
 			countMax = count;
-		// if (count == 1)
-			// printf("\n%d - %d\n", i, count);
-		histo[count]++;
+
+		//increments hist[count] where count is 
+		//identical with all other vectors including itself
+		hist[count]++;
 	}
 
+	//prints histogram
+	printf("\nCPU Optimized Histogram\n");
 	for(int i = 1; i <= countMax; i++) {
-		if ((long) (histo[i] / i) > 0)
-			printf("%d    %ld\n", i, (long) (histo[i] / i));
+		if ((long) (hist[i] / i) > 0)
+			printf("%d    %ld\n", i, (long) (hist[i] / i));
 	}
+
+	//frees memory
+	free(hist);
 }
 
 //CUDA ERROR
@@ -444,21 +462,32 @@ void checkCudaError(cudaError_t e, const char* in) {
 }
 
 //TEST PREP & KERNEL
-void TEST_PREP() {
+void TEST_PREP(igraph_t &graph) {
 	
-	int test[13] = {0, 0, 0, 9, 8, 2, 0, 1, 3, 6, 4, 5, 7}, *d_test, result[13];
-		
-	cudaMalloc((void**)&d_test, 13*sizeof(int));
-	cudaMemcpy(d_test, test, 13*sizeof(int), cudaMemcpyHostToDevice);
+	//num vertices
+	int n_vertices = igraph_vcount(&graph);
 
-	
-	TEST<<<1,1>>>(d_test);
-	checkCudaError(cudaGetLastError(), "Checking Last Error, Kernel Launch");
-	
-	cudaMemcpy(result, d_test, 13*sizeof(int), cudaMemcpyDeviceToHost);
+	//2d adj list and size
+	int **adj2d = (int**)malloc(sizeof(int*)*n_vertices);
+	int *adjsize = (int*)malloc(sizeof(int)*n_vertices);
+	int totalsize = 0, vsize;
 
-	for(int i = 0; i < 13; i++)
-		printf("%d\n", result[i]);
+	//vector for single vertices adj list
+	igraph_vector_t neisVec;
+
+	//creates 2d adj list
+	for(int i = 0; i < n_vertices; i++) {
+
+		igraph_neighbors(&graph, &neisVec, i, OUTALL);
+		vsize = igraph_vector_size(&neisVec);
+
+		adj2d[i] = (int*)malloc(sizeof(int)*vsize);
+
+		for(int j = 0; j < n_vertices; j++) {
+
+
+		}
+	}
 }
 __global__ void TEST(int* test) {
 

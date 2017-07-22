@@ -25,10 +25,10 @@ __global__ void OPT_1(int* adj, int* lcm, int* sizes, int n);
 __global__ void OPT_1_HIST(int* lcm, int* hist, int n);
 
 //OPTIMIZATION 2 KERNELS & PREP
-void OPT_2_PREP(igraph_t &graph);
-__global__ void OPT_2_SIZES(int* adj, int* lcmsizes, int* sizes, int n);
-__global__ void OPT_2(int* adj, int* lcm, int* sizes, int* lcmsizes, int n);
-__global__ void OPT_2_HIST(int* lcm, int* hist, int* lcmsizes, int n);
+void OPT_3_PREP(igraph_t &graph);
+__global__ void OPT_3_SIZES(int* adj, int* lcmsizes, int* sizes, int n);
+__global__ void OPT_3(int* adj, int* lcm, int* sizes, int* lcmsizes, int n);
+__global__ void OPT_3_HIST(int* lcm, int* hist, int* lcmsizes, int n);
 
 //CUDA ERROR
 void checkCudaError(cudaError_t e, const char* in);
@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
 	//gpu shit
 	//Naive_Prep(graph);
 	//OPT_1_PREP(graph);
-	OPT_2_PREP(graph);
+	OPT_3_PREP(graph);
 	
 	
 	return 0;
@@ -740,7 +740,7 @@ __global__ void OPT_1_HIST(int* lcm, int* hist, int n) {
 }
 
 //OPTIMIZATION 2 KERNELS & PREP
-void OPT_2_PREP(igraph_t &graph) {
+void OPT_3_PREP(igraph_t &graph) {
 
 	//num vertices
 	int n_vertices = igraph_vcount(&graph);
@@ -817,17 +817,17 @@ void OPT_2_PREP(igraph_t &graph) {
 	cudaEventRecord(start, 0);
 
 	//lcm sizes kernel
-	OPT_2_SIZES<<<n_vertices, threads>>>(d_adj, d_lcmsizes, d_adjsizes, n_vertices);
+	OPT_3_SIZES<<<n_vertices, threads>>>(d_adj, d_lcmsizes, d_adjsizes, n_vertices);
 	int lcmsize;
 	checkCudaError(cudaMemcpy(&lcmsize, &d_lcmsizes[n_vertices], sizeof(int), cudaMemcpyDeviceToHost), "Memcpy lcmsize");
 	checkCudaError(cudaMalloc((void**)&d_lcm, sizeof(int)*lcmsize), "Malloc d_lcm");
 	checkCudaError(cudaMemset(d_lcm, 0, sizeof(int)*lcmsize), "Memset d_lcm");
 
 	//get lcm shit
-	OPT_2<<<n_vertices, threads>>>(d_adj, d_lcm, d_adjsizes, d_lcmsizes, n_vertices);
+	OPT_3<<<n_vertices, threads>>>(d_adj, d_lcm, d_adjsizes, d_lcmsizes, n_vertices);
 
 	//histogram
-	OPT_2_HIST<<<n_vertices, threads>>>(d_lcm, d_hist, d_lcmsizes, n_vertices);
+	OPT_3_HIST<<<n_vertices, threads>>>(d_lcm, d_hist, d_lcmsizes, n_vertices);
 	
 	//kernel execution stop
 	cudaEventRecord(stop, 0);
@@ -862,7 +862,7 @@ void OPT_2_PREP(igraph_t &graph) {
 	cudaFree(d_lcmsizes);
 }
 
-__global__ void OPT_2_SIZES(int* adj, int* lcmsizes, int* sizes, int n) {
+__global__ void OPT_3_SIZES(int* adj, int* lcmsizes, int* sizes, int n) {
 
 	int vertex = blockIdx.x;
 	int vcomp = threadIdx.x;
@@ -908,7 +908,7 @@ __global__ void OPT_2_SIZES(int* adj, int* lcmsizes, int* sizes, int n) {
 	// 	thrust::sort(thrust::device, &lcm[vertex*n], &lcm[vertex*n] + n);
 }
 
-__global__ void OPT_2(int* adj, int* lcm, int* sizes, int* lcmsizes, int n) {
+__global__ void OPT_3(int* adj, int* lcm, int* sizes, int* lcmsizes, int n) {
 
 	int vertex = blockIdx.x;
 	int vcomp = threadIdx.x;
@@ -950,7 +950,7 @@ __global__ void OPT_2(int* adj, int* lcm, int* sizes, int* lcmsizes, int n) {
 		thrust::sort(thrust::device, &lcm[lcmsizes[vertex]], &lcm[lcmsizes[vertex+1]]);
 }
 
-__global__ void OPT_2_HIST(int* lcm, int* hist, int* lcmsizes, int n) {
+__global__ void OPT_3_HIST(int* lcm, int* hist, int* lcmsizes, int n) {
 
 	//
 }

@@ -11,6 +11,13 @@
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 
+//STRUCTS
+typedef struct {
+  int *array;
+  size_t used;
+  size_t size;
+} Array;
+
 //GLOBAL VARS
 igraph_neimode_t OUTALL;
 
@@ -24,12 +31,10 @@ void OPT_1_PREP(igraph_t &graph);
 __global__ void OPT_1(int* adj, int* lcm, int* sizes, int n);
 __global__ void OPT_1_HIST(int* lcm, int* hist, int n);
 
-//OPTIMIZATION 2 KERNELS & PREP
-void OPT_2_PREP(igraph_t &graph);
-__global__ void OPT_2_SIZES(int* adj, int* lcmsizes, int* sizes, int n);
-__global__ void OPT_2_SIZES_SUM(int* lcmsizes, int n);
-__global__ void OPT_2(int* adj, int* lcm, int* sizes, int* lcmsizes, int n);
-__global__ void OPT_2_HIST(int* lcm, int* hist, int* lcmsizes, int n);
+//OPTIMIZED 2 SATHYAS GPU 1
+int OPT_2_PREP(igraph_t &graph, igraph_neimode_t OUTALL, int numThreads);
+__global__ void OPT_2_SIZES(int *d_adjList, int *d_sizeAdj, int *d_LCMSize, int n_vertices);
+__global__ void OPT_2(int *d_adjList, int *d_sizeAdj, int *d_lcmMatrix, int *d_LCMSize, int n_vertices);
 
 //OPTIMIZATION 3 KERNELS & PREP
 void OPT_3_PREP(igraph_t &graph);
@@ -38,19 +43,32 @@ __global__ void OPT_3_SIZES_SUM(int* lcmsizes, int n);
 __global__ void OPT_3(int* adj, int* lcm, int* sizes, int* lcmsizes, int n);
 __global__ void OPT_3_HIST(int* lcm, int* hist, int* lcmsizes, int n);
 
-//SATHYAS
-int LCM_Kernel_Prep(igraph_t &graph, igraph_neimode_t OUTALL, int numThreads);
-__global__ void LCM_Hist_Kernel(int *d_lcmMatrix, int n_vertices);
-__global__ void Get_LCM_Kernel(int *d_adjList, int *d_sizeAdj, int *d_lcmMatrix, int *d_LCMSize, int n_vertices);
-__global__ void Get_LCMSize_Kernel(int *d_adjList, int *d_sizeAdj, int *d_LCMSize, int n_vertices);
+//OPTIMIZED 4 SATHYAS GPU 2
+int OPT_4_PREP(igraph_t &graph, igraph_neimode_t OUTALL, int numThreads);
+__global__ void OPT_4_SIZES(int *d_adjList, int *d_sizeAdj, int *d_LCMSize, int n_vertices);
+__global__ void OPT_4(int *d_adjList, int *d_sizeAdj, int *d_lcmMatrix, int *d_LCMSize, int n_vertices);
+__global__ void OPT_4_HIST(int *d_lcmMatrix, int *d_LCMSize, int *d_histogram, int n_vertices);
+
+//OPTIMIZED CPU
+void LCM_CPU_Kernel(long int **adjList, int *sizeAdj, int n_vertices);
+void LCM_CPU(igraph_t &graph, igraph_neimode_t OUTALL);
+void initArray(Array *a, size_t initialSize);
+void insertArray(Array *a, int element);
+void freeArray(Array *a);
+int commonNeighbor(long int arr1[], long int arr2[], int m, int n);
+int equalArray(Array a1, Array a2);
+int compare(const void* a, const void* b);
+
+//CPU BASELINE/NAIVE
+void LCM_cpu_baseline(igraph_t &graph);
 
 //CUDA ERROR
-void checkCudaError(cudaError_t e, const char* in);
-
-//FUNCTIONS
-void linkage_covariance(igraph_t &graph);
-void LCM_cpu_baseline(igraph_t &graph);
-int compare(const void* a, const void* b);
+void checkCudaError(cudaError_t e, const char* in) {
+	if (e != cudaSuccess) {
+		printf("CUDA Error: %s, %s \n", in, cudaGetErrorString(e));
+		//exit(EXIT_FAILURE);
+	}
+}
 
 //main
 int main(int argc, char** argv) {
@@ -93,23 +111,110 @@ int main(int argc, char** argv) {
 	// gettimeofday(&start, NULL);
 	// LCM_cpu_baseline(graph);
 	// gettimeofday(&stop, NULL);
-	// printf("CPU Naive Running Time: %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
+	// printf("CPU Optimized Running Time on %d Nodes: %2f sec\n", igraph_vcount(&graph), ((stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f) / 1000.0f);
 
 	//cpu optimized
 	gettimeofday(&start, NULL);
-	//linkage_covariance(graph);
+	LCM_CPU(graph, OUTALL);
 	gettimeofday(&stop, NULL);
-	printf("CPU Optimized Running Time on %d Nodes: %2f ms\n", igraph_vcount(&graph), (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
+	printf("CPU Optimized Running Time on %d Nodes: %2f sec\n", igraph_vcount(&graph), ((stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f) / 1000.0f);
 
 	//gpu shit
+	int threads = 128;
 	//Naive_Prep(graph);
 	//OPT_1_PREP(graph);
-	//OPT_2_PREP(graph);
-	//OPT_3_PREP(graph);
-	LCM_Kernel_Prep(graph, OUTALL, 128);
-	
+	OPT_2_PREP(graph, OUTALL, threads);
+	OPT_3_PREP(graph);
+	OPT_4_PREP(graph, OUTALL, threads);
 	
 	return 0;
+}
+
+//NAIVE GPU
+void Naive_Prep(igraph_t &graph) {
+
+	//creates adjacency matrix and gets num vertices
+	int *matrix, n_vertices = igraph_vcount(&graph);
+	long int vsize;
+	
+	//vertice adj vectors, intialized to size 0
+	igraph_vector_t vec;
+	igraph_vector_init(&vec, 0);
+	
+	//initializes matrix and sets to zero
+	matrix = (int *)malloc(n_vertices*n_vertices*sizeof(int));
+	memset(matrix, 0, sizeof(int)*n_vertices*n_vertices);
+
+	//builds adj matrix
+	for(int i = 0; i < n_vertices; i++) {
+		
+		//gets vertice i's neighbors and number of adjacencies
+		igraph_neighbors(&graph, &vec, i, OUTALL);
+		vsize = igraph_vector_size(&vec);
+
+		//puts ones in the adj matrix where they belong
+		for(int j = 0; j < vsize; j++) {
+
+			matrix[i*n_vertices + (int)VECTOR(vec)[j]] = 1;
+		}
+	}
+
+	//CUDA SHIT
+	int hsize = 64;
+	int *hist, *d_hist;
+	hist = (int*)malloc(sizeof(int)*hsize);
+	cudaMalloc((void**)&d_hist, sizeof(int)*hsize);
+
+	//creates 2 adjacency matrix graphs for device
+	int *d_matrix, *d_result;
+	cudaMalloc((void**)&d_matrix, sizeof(int)*n_vertices*n_vertices);
+	cudaMalloc((void**)&d_result, sizeof(int)*n_vertices*n_vertices);
+	
+	//copys adj matrix to device and sets device hist and result to zero
+	cudaMemcpy(d_matrix, matrix, sizeof(int)*n_vertices*n_vertices, cudaMemcpyHostToDevice);
+	cudaMemset(d_result, 0, sizeof(int)*n_vertices*n_vertices);
+	cudaMemset(d_hist, 0, sizeof(int)*hsize);
+	//memset(hist, 0, sizeof(int)*hsize);
+
+	//kernel execution time crap
+	float elapsedTime;
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
+
+	//kernels for lcm and hist
+	Naive<<<n_vertices, 1024>>>(d_matrix, d_result, n_vertices);
+	Naive_Hist<<<n_vertices, 1024>>>(d_result, d_hist, n_vertices);
+	
+	//copies hist back to host
+	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*hsize, cudaMemcpyDeviceToHost), "D_HIST TO HOST");
+	
+	//kernel execution stop
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(start);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cudaEventDestroy(start);
+	cudaEventDestroy(stop);
+
+	//prints gpu histogram
+	printf("\nGPU HISTOGRAM\n");
+	for(int i = 1; i < hsize; i++) {
+		if ((hist[i] / i) > 0)
+			printf("%d    %d\n", i, (hist[i] / i));
+	}
+
+	//prints kernel running time
+	//printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
+	printf("\n******** Naive Processed %d Node Graph In %0.5f sec *******\n", n_vertices, elapsedTime/1000);
+
+	//frees all the shit
+	free(matrix);
+	free(hist);
+	cudaFree(d_matrix);
+	cudaFree(d_result);
+	cudaFree(d_hist);
 }
 
 //uses adjaceny matrix, slow and takes a shit load of device memory, lots of zeros
@@ -191,313 +296,7 @@ __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices) {
 		atomicAdd(&d_hist[count], 1);
 }
 
-void Naive_Prep(igraph_t &graph) {
-
-	//creates adjacency matrix and gets num vertices
-	int *matrix, n_vertices = igraph_vcount(&graph);
-	long int vsize;
-	
-	//vertice adj vectors, intialized to size 0
-	igraph_vector_t vec;
-	igraph_vector_init(&vec, 0);
-	
-	//initializes matrix and sets to zero
-	matrix = (int *)malloc(n_vertices*n_vertices*sizeof(int));
-	memset(matrix, 0, sizeof(int)*n_vertices*n_vertices);
-
-	//builds adj matrix
-	for(int i = 0; i < n_vertices; i++) {
-		
-		//gets vertice i's neighbors and number of adjacencies
-		igraph_neighbors(&graph, &vec, i, OUTALL);
-		vsize = igraph_vector_size(&vec);
-
-		//puts ones in the adj matrix where they belong
-		for(int j = 0; j < vsize; j++) {
-
-			matrix[i*n_vertices + (int)VECTOR(vec)[j]] = 1;
-		}
-	}
-
-	//CUDA SHIT
-	int hsize = 64;
-	int *hist, *d_hist;
-	hist = (int*)malloc(sizeof(int)*hsize);
-	cudaMalloc((void**)&d_hist, sizeof(int)*hsize);
-
-	//creates 2 adjacency matrix graphs for device
-	int *d_matrix, *d_result;
-	cudaMalloc((void**)&d_matrix, sizeof(int)*n_vertices*n_vertices);
-	cudaMalloc((void**)&d_result, sizeof(int)*n_vertices*n_vertices);
-	
-	//copys adj matrix to device and sets device hist and result to zero
-	cudaMemcpy(d_matrix, matrix, sizeof(int)*n_vertices*n_vertices, cudaMemcpyHostToDevice);
-	cudaMemset(d_result, 0, sizeof(int)*n_vertices*n_vertices);
-	cudaMemset(d_hist, 0, sizeof(int)*hsize);
-	//memset(hist, 0, sizeof(int)*hsize);
-
-	//kernel execution time crap
-	float elapsedTime;
-	cudaEvent_t start, stop;
-	cudaEventCreate(&start);
-	cudaEventCreate(&stop);
-	cudaEventRecord(start, 0);
-
-	//kernels for lcm and hist
-	Naive<<<n_vertices, 1024>>>(d_matrix, d_result, n_vertices);
-	Naive_Hist<<<n_vertices, 1024>>>(d_result, d_hist, n_vertices);
-	
-	//copies hist back to host
-	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*hsize, cudaMemcpyDeviceToHost), "D_HIST TO HOST");
-	
-	//kernel execution stop
-	cudaEventRecord(stop, 0);
-	cudaEventSynchronize(start);
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&elapsedTime, start, stop);
-	cudaEventDestroy(start);
-	cudaEventDestroy(stop);
-
-	//prints gpu histogram
-	printf("\nGPU HISTOGRAM\n");
-	for(int i = 1; i < hsize; i++) {
-		if ((hist[i] / i) > 0)
-			printf("%d    %d\n", i, (hist[i] / i));
-	}
-
-	//prints kernel running time
-	printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
-	printf("\n******** Total Running Time of Kernel = %0.5f sec *******\n", elapsedTime/1000);
-
-	//frees all the shit
-	free(matrix);
-	free(hist);
-	cudaFree(d_matrix);
-	cudaFree(d_result);
-	cudaFree(d_hist);
-}
-
-//qsort compare function
-int compare(const void* a, const void* b) {
-	return ( *(int*)a - *(int*)b );
-}
-
-//naive cpu version, slow and takes a shit load of host memory
-//uses adjacency matrix on cpu
-void LCM_cpu_baseline(igraph_t &graph) {
-
-	//gets num vertices and allocates, sets to zero adj matrix
-	int n_vertices = igraph_vcount(&graph), vsize;
-	int *matrix = (int *)malloc(n_vertices*n_vertices*sizeof(int));
-	memset(matrix, 0, sizeof(int)*n_vertices*n_vertices);
-
-	//graph vector and initializes it to zero
-	igraph_vector_t vec;
-	igraph_vector_init(&vec, 0);
-
-	//builds adj matrix
-	for(int i = 0; i < n_vertices; i++) {
-
-		//grabs neighbors and size
-		igraph_neighbors(&graph, &vec, i, OUTALL);
-		vsize = igraph_vector_size(&vec);
-
-		//adds ones where its adjacent
-		for(int j = 0; j < vsize; j++) {
-
-			matrix[i*n_vertices + (int)VECTOR(vec)[j]] = 1;
-		}
-	}
-
-	//result adj matrix set to zero
-	int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
-	memset(result, 0, sizeof(int)*n_vertices*n_vertices);
-	int cval;
-
-	//multiplies it against itself
-	for(int i = 0; i < n_vertices; i++) {
-
-		for(int j = i+1; j < n_vertices; j++) {
-
-			cval = 0;
-
-			for(int k = 0; k < n_vertices; k++)
-				cval += matrix[i*n_vertices + k] * matrix[k*n_vertices + j];
-
-			//enters val and transposes
-			result[i*n_vertices + j] = cval;
-			result[j*n_vertices + i] = cval;
-		}
-
-		//sorts the vertice/row
-		qsort(&result[i*n_vertices], n_vertices + 0, sizeof(int), compare);
-	}
-
-	//multiplies it against itself, REALL SLOW CODE LOL
-	// int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
-	// memset(result, 0, sizeof(int)*n_vertices*n_vertices);
-	// int cval;
-
-	// for(int i = 0; i < n_vertices; i++) {
-
-	// 	for(int j = 0; j < n_vertices; j++) {
-
-	// 		cval = 0;
-
-	// 		for(int k = 0; k < n_vertices; k++) {
-
-	// 			cval += matrix[i*n_vertices + k] * matrix[k*n_vertices + j];
-	// 		}
-
-	// 		result[i*n_vertices + j] = cval;
-	// 	}
-
-	// 	qsort(&result[i*n_vertices], n_vertices +1, sizeof(int), compare);
-	// }
-
-	//histogram
-	bool equal;
-	int count, countMax = -1;
-	int *hist = (int*)malloc(sizeof(int) * n_vertices);
-	memset(hist, 0, sizeof(int)*n_vertices);
-
-	for(int i = 0; i < n_vertices; i++) {
-
-		count = 0;
-
-		for(int j = 0; j < n_vertices; j++) {
-
-			equal = false;
-
-			for(int k = 0; k < n_vertices; k++) {
-
-				if(result[i*n_vertices + k] == result[j*n_vertices + k])
-					equal = true;
-				else {
-					equal = false;
-					break;
-				}
-			}
-
-			if(equal)
-				++count;
-		}
-		if(countMax < count)
-				countMax = count;
-
-		++hist[count];
-	}
-
-	//prints results
-	printf("\nCPU Naive Histogram\n");
-	for(int i = 1; i <= countMax; i++) {
-		if ((long) (hist[i] / i) > 0)
-			printf("%d    %ld\n", i, (long) (hist[i] / i));
-	}
-
-	//frees shit
-	free(matrix);
-	free(result);
-	free(hist);
-}
-
-void linkage_covariance(igraph_t &graph) {
-
-	//gets number of vertices
-	int n_vertices = igraph_vcount(&graph);
-
-	//neighbor vectors and init, holds adj vertices
-	igraph_vector_t neisVec1, neisVec2, compVec;
-	igraph_vector_init(&neisVec1, 1);
-	igraph_vector_init(&neisVec2, 1);
-	igraph_vector_init(&compVec, 1);
-
-	//jagged 2d array holding lcm
-	igraph_vector_t arrVec[n_vertices];
-	
-	//initializes all the array of vectors to 0 size
-	for(int j = 0; j < n_vertices; j++)
-		igraph_vector_init(&arrVec[j], 0);
-					
-	//finds similar vertices
-	for(int i = 0; i < n_vertices; i++) {
-		
-		//grabs neighbors/adj vertices
-		igraph_neighbors(&graph, &neisVec1, i, OUTALL);
-		
-		//checks similaries with neighbors
-		for(int j = i+1; j < n_vertices; j++) {
-
-			//gets neighbors of next vertice and compares similarities using set intersection
-			igraph_neighbors(&graph, &neisVec2, j, OUTALL);
-			igraph_vector_intersect_sorted(&neisVec1, &neisVec2, &compVec);
-
-			//pushes back for vertex i and transposes to j
-			if (igraph_vector_size(&compVec) > 0) {
-				
-				igraph_vector_push_back(&arrVec[i], igraph_vector_size(&compVec));
-				igraph_vector_push_back(&arrVec[j], igraph_vector_size(&compVec));
-			}
-		}
-	}
-
-	//vars for the histogram
-	long int *hist;
-	hist = (long int*)malloc(sizeof(long int)*n_vertices);
-	memset(hist, 0, sizeof(long int)*n_vertices);
-	int count = 0, countMax = -1;
-
-	//calculates the histogram
-	for(int i = 0; i < n_vertices; i++) {
-		
-		//sets count to zero and sorts the vector
-		count = 0;
-		igraph_vector_sort(&arrVec[i]);
-
-		//checks for equality
-		for(int j = 0; j < n_vertices; j++) {
-			
-			//if they arent equal size, they arent equal
-			if(igraph_vector_size(&arrVec[i]) != igraph_vector_size(&arrVec[j]))
-				continue;
-
-			//sorts other row we are comparing
-			igraph_vector_sort(&arrVec[j]);
-			
-			//if vectors are equal, increments count
-			if(igraph_vector_all_e(&arrVec[i], &arrVec[j]))				
-				count++;
-		}
-
-		//keep track of max count
-		if(countMax < count)
-			countMax = count;
-
-		//increments hist[count] where count is 
-		//identical with all other vectors including itself, count should always be > 0
-		hist[count]++;
-	}
-
-	//prints histogram
-	printf("\nCPU Optimized Histogram\n");
-	for(int i = 1; i <= countMax; i++) {
-		if ((long) (hist[i] / i) > 0)
-			printf("%d    %ld\n", i, (long) (hist[i] / i));
-	}
-
-	//frees memory
-	free(hist);
-}
-
-//CUDA ERROR
-void checkCudaError(cudaError_t e, const char* in) {
-	if (e != cudaSuccess) {
-		printf("CUDA Error: %s, %s \n", in, cudaGetErrorString(e));
-		//exit(EXIT_FAILURE);
-	}
-}
-
-//TEST PREP & KERNEL
+//OPT 1 PREP & KERNEL
 void OPT_1_PREP(igraph_t &graph) {
 
 	//num vertices
@@ -654,8 +453,8 @@ void OPT_1_PREP(igraph_t &graph) {
 	}
 
 	//prints kernel running time
-	printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
-	printf("\n******** Total Running Time of Kernel = %0.5f sec *******\n", elapsedTime/1000);
+	//printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
+	printf("\n******** OPT_1 Processed %d Node Graph In %0.5f sec *******\n", n_vertices, elapsedTime/1000);
 
 	//frees everything
 	cudaFree(d_hist);
@@ -755,6 +554,367 @@ __global__ void OPT_1_HIST(int* lcm, int* hist, int n) {
 		atomicAdd(&hist[cval], 1);
 		//printf("\nv%d: %d\n", vertex, cval);
 	}
+}
+
+//OPTIMIZED 2 SATHYAS GPU 1
+int OPT_2_PREP(igraph_t &graph, igraph_neimode_t OUTALL, int numThreads)
+{
+    printf("\nAllocating Adjacency List\n");
+    int n_vertices = igraph_vcount(&graph);
+    igraph_adjlist_t al;
+    igraph_adjlist_init(&graph, &al, OUTALL);
+    igraph_adjlist_simplify(&al);
+
+    int **adjList2D;
+    int totalSize = 0;
+
+    int *adjList, *d_adjList;
+    int *sizeAdj, *d_sizeAdj;
+
+    int *lcmMatrix, *d_lcmMatrix;
+
+    int *d_LCMSize, *LCMSize, *LCMSize_Calc;
+    
+    adjList2D = (int **) calloc(n_vertices, sizeof(int *));
+    sizeAdj = (int *) malloc(n_vertices * sizeof(int));
+    LCMSize = (int *) malloc(n_vertices * sizeof(int));
+    LCMSize_Calc = (int *) malloc(n_vertices * sizeof(int));
+    memset(LCMSize, 0, n_vertices*sizeof(int));
+    memset(LCMSize_Calc, 0, n_vertices*sizeof(int));
+    printf("Computing Adjacency List - %d vertices...\n", n_vertices);
+
+    for (int i = 0; i < n_vertices; i++) {
+        igraph_vector_int_t *adjVec = igraph_adjlist_get(&al, i);
+
+        // igraph_vector_t adjVec;
+        // igraph_vector_init(&adjVec, 0);
+        // igraph_neighbors(&graph, &adjVec, i, OUTALL);
+
+        adjList2D[i] = (int *) malloc(igraph_vector_int_size(adjVec) * sizeof(int));
+        sizeAdj[i] = (int) igraph_vector_int_size(adjVec);
+        totalSize += sizeAdj[i];
+        for(int k = 0; k< igraph_vector_int_size(adjVec); k++)
+        {
+            adjList2D[i][k] = (int) VECTOR(*adjVec)[k];
+        }
+    }
+
+    for(int i = 0; i< n_vertices; i++)
+    {
+        qsort(adjList2D[i], sizeAdj[i], sizeof(int), compare);
+    }
+    
+    adjList = (int *) malloc(totalSize * sizeof(int));
+    int l = -1;
+    for (int q = 0; q < n_vertices; q++)
+    {
+        for (int t = 0; t < sizeAdj[q]; t++)
+        {
+            l++;
+            adjList[l] = adjList2D[q][t];
+        }
+    }
+    for(int i = 0; i< n_vertices; i++)
+    {
+        free(adjList2D[i]);
+        if(i>0)
+        {
+            sizeAdj[i] += sizeAdj[i - 1];
+        }
+    }
+    
+    //kernel execution time crap
+	float elapsedTime;
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
+
+    free(adjList2D);
+    // memset(LCMSize, 0, n_vertices*sizeof(int));
+    printf("%d-%d\n", totalSize, sizeAdj[n_vertices-1]);
+    printf("Got Adj List...\n Allocating on gpu mem...");
+    checkCudaError(cudaMalloc((void**)&d_adjList, totalSize * sizeof(int)), "Malloc Error d_adjList");
+    checkCudaError(cudaMalloc((void**)&d_sizeAdj, n_vertices * sizeof(int)), "Malloc Error d_sizeAdj");
+    checkCudaError(cudaMalloc((void**)&d_LCMSize, n_vertices * sizeof(int)), "Malloc Error d_sizeAdj");
+
+    cudaMemcpy(d_adjList, adjList, totalSize * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sizeAdj, sizeAdj, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_LCMSize, LCMSize_Calc, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
+
+    dim3 DimGrid(ceil(n_vertices/numThreads), 1, 1);   
+    if (n_vertices%numThreads) 
+    {
+        DimGrid.x++;
+    }
+
+    dim3 DimBlock(numThreads, 1, 1);
+    int totLCMSize = 0;
+    printf("Launching Size Kernel...\n");
+    OPT_2_SIZES<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_LCMSize, n_vertices);
+    cudaThreadSynchronize();
+    cudaDeviceSynchronize();
+    checkCudaError(cudaGetLastError(), "Checking Last Error, Size Kernel Launch");
+    cudaMemcpy(LCMSize_Calc, d_LCMSize, n_vertices * sizeof(int), cudaMemcpyDeviceToHost);
+    
+    for(int i = 0; i<n_vertices; i++)
+    {
+        totLCMSize += LCMSize_Calc[i];
+        LCMSize[i] = LCMSize_Calc[i];
+    }
+
+    for(int i = 1; i<n_vertices; i++)
+    {
+        if(i>0)
+            LCMSize[i] += LCMSize[i - 1];
+    }
+    printf("%d - %d\n", totalSize, totLCMSize);
+    
+    lcmMatrix = (int *) malloc(totLCMSize * sizeof(int));
+    memset(lcmMatrix, 0, totLCMSize*sizeof(int));
+    checkCudaError(cudaMalloc((void**)&d_lcmMatrix, totLCMSize * sizeof(int)), "Malloc Error d_lcmMatrix");
+    cudaMemcpy(d_lcmMatrix, lcmMatrix, totLCMSize * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_LCMSize, LCMSize, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
+    printf("Launching LCM Kernel...\n");
+    
+    // LCM_Kernel<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_lcmMatrix, d_LCMSize, n_vertices);
+    OPT_2<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_lcmMatrix, d_LCMSize, n_vertices);
+    
+	cudaThreadSynchronize();
+    cudaDeviceSynchronize();
+    checkCudaError(cudaGetLastError(), "Checking Last Error, Kernel Launch");
+    printf("Copying to CPU Memory...\n");
+    checkCudaError(cudaMemcpy(lcmMatrix, d_lcmMatrix, totLCMSize * sizeof(int), cudaMemcpyDeviceToHost), "cudaMemcpy Error d_lcmMatrix");
+    // checkCudaError(cudaMemcpy(LCMSize, d_LCMSize, n_vertices * sizeof(int), cudaMemcpyDeviceToHost), "cudaMemcpy Error LCMSize");
+    
+    cudaFree(d_lcmMatrix);
+    cudaFree(d_LCMSize);
+    cudaFree(d_adjList);
+    cudaFree(d_sizeAdj);
+    free(sizeAdj);
+    free(adjList);
+
+    printf("Allocating Histogram...\n");
+    int *histo;
+    histo = (int *) malloc(n_vertices * sizeof(int));
+    memset(histo, 0, sizeof(int)*n_vertices);
+    int count = 0, countMax = -1;
+    // int *neisVec1, *neisVec2;
+    // neisVec1 = (int *) malloc(1 * sizeof(int));
+    // neisVec2 = (int *) malloc(1 * sizeof(int));
+   
+    printf("Sorting LCM...\n");
+    // int totLCMSize1 = 0;
+
+/*
+    for(int i = 1; i< n_vertices; i++)
+    {
+    	LCMSize[i] += LCMSize[i-1];
+    }
+*/
+    
+	for(int i = 0; i< n_vertices; i++)
+	{
+		int offset = 0;
+		if(i > 0)
+		{
+			offset = LCMSize[i - 1];
+		}
+		// printf("%d - %d\n", offset, LCMSize_Calc[i]);
+		qsort(lcmMatrix + offset, LCMSize_Calc[i], sizeof(int), compare);
+		// totLCMSize1 += LCMSize[i];
+	}
+	// for(int i = 0; i<LCMSize_Calc[4000]; i++)
+	// 	printf("%d-", lcmMatrix[LCMSize[3999] + i]);
+	printf("Computing Histogram...\n");
+	// return 0;
+    for(int i = 0; i< n_vertices; i++)
+    {
+        int iStart = 0;
+        if(i>0)
+            iStart = LCMSize[i - 1]; //Offset
+        count = 0;
+
+        for(int j = 0; j < n_vertices; j++) {
+            if(LCMSize_Calc[i] != LCMSize_Calc[j])
+                continue;
+            
+            int jStart = 0;
+            
+            if(j>0)
+                jStart = LCMSize[j - 1]; //Offset
+            
+            int eq = 1;
+            for(int k = 0; k < LCMSize_Calc[i]; k++)
+            {
+            	if(lcmMatrix[iStart + k] != lcmMatrix[jStart + k])
+            	{
+            		eq = 0;
+            		break;
+            	}
+            }
+            if(eq == 1)
+            {               
+                count++;
+            }
+        }
+
+        if(countMax < count)
+            countMax = count;
+        histo[count]++;
+    }
+
+    //kernel execution stop
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(start);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cudaEventDestroy(start);
+	cudaEventDestroy(stop);
+
+
+    printf("Finished Histogram...\n");
+    for(int i = 1; i <= countMax; i++) {
+        if ((long) (histo[i] / i) > 0)
+            printf("%d    %d\n", i, (int) (histo[i] / i));
+    }
+
+    //kernels total times
+	//printf("\n******** Processed %d Node Graph In %0.5f ms *******\n", n_vertices, elapsedTime);
+	printf("\n******** OPT_2 Processed %d Node Graph In %0.5f sec *******\n", n_vertices, elapsedTime/1000);
+
+    //frees
+    free(lcmMatrix);
+    free(LCMSize_Calc);
+    free(LCMSize);
+    free(histo);
+	return 0;
+}
+
+__global__ void OPT_2_SIZES(int *d_adjList, int *d_sizeAdj, int *d_LCMSize, int n_vertices)
+{
+    int i = threadIdx.x + blockDim.x * blockIdx.x;     
+    if(i<n_vertices)
+    {
+        int indexUsed = 0;
+        int iStart = 0, iEnd = 0;
+        int k = 0;
+
+        if(i > 0)
+        {       
+            k = d_sizeAdj[i-1];
+        }
+
+        iEnd = d_sizeAdj[i];
+
+        __syncthreads();
+
+        for(int j = 0; j < n_vertices; j++) {
+            if(i==j)
+                continue;
+            iStart = k;
+            int jStart = 0, jEnd = 0;
+
+            if(j > 0)
+                jStart = d_sizeAdj[j-1];
+            jEnd = d_sizeAdj[j];
+            
+            int compVec = 0;
+
+            while (iStart < iEnd && jStart < jEnd)
+            {
+                    if(d_adjList[iStart] < d_adjList[jStart])
+                        iStart++;
+                    else if (d_adjList[jStart] < d_adjList[iStart])
+                        jStart++;
+                    else // if arr1[i] == arr2[j] 
+                    {
+                        jStart++;
+                        iStart++;
+                        compVec++;
+                        // break;
+                    }
+            }
+
+            if (compVec > 0)
+            {
+                indexUsed++;
+            }
+        }
+    
+        __syncthreads();
+        d_LCMSize[i] = indexUsed;
+        // __syncthreads();
+    
+    }
+
+}
+
+__global__ void OPT_2(int *d_adjList, int *d_sizeAdj, int *d_lcmMatrix, int *d_LCMSize, int n_vertices)
+{
+    int i = threadIdx.x + blockDim.x * blockIdx.x;     
+    if(i<n_vertices)
+    {
+        int indexUsed = 0, indexOffset = 0;
+        int iStart = 0, iEnd = 0;
+        int k = 0;
+
+        if(i > 0)
+        {       
+            k = d_sizeAdj[i-1];
+            indexOffset = d_LCMSize[i-1];
+        }
+
+        iEnd = d_sizeAdj[i];
+        
+        for(int j = indexOffset; j<iEnd; j++)
+        {
+            d_lcmMatrix[j] = 0;
+        }
+
+        __syncthreads();
+
+        for(int j = 0; j < n_vertices; j++) {
+            if(i==j)
+                continue;
+            iStart = k;
+            int jStart = 0, jEnd = 0;
+
+            if(j > 0)
+                jStart = d_sizeAdj[j-1];
+            jEnd = d_sizeAdj[j];
+            
+            int compVec = 0;
+
+            while (iStart < iEnd && jStart < jEnd)
+            {
+                    if(d_adjList[iStart] < d_adjList[jStart])
+                        iStart++;
+                    else if (d_adjList[jStart] < d_adjList[iStart])
+                        jStart++;
+                    else // if arr1[i] == arr2[j] 
+                    {
+                        jStart++;
+                        iStart++;
+                        compVec++;
+                    }
+            }
+
+            if (compVec > 0)
+            {
+                atomicAdd((int*)&d_lcmMatrix[indexUsed + indexOffset], compVec);
+                // d_lcmMatrix[indexUsed + indexOffset] = compVec;
+                indexUsed++;
+            }
+            // __syncthreads();
+        }
+    
+        // __syncthreads();
+        // d_LCMSize[i] = indexUsed;
+        // __syncthreads();
+    
+    }
+
 }
 
 //OPTIMIZATION 2 KERNELS & PREP
@@ -941,8 +1101,8 @@ void OPT_3_PREP(igraph_t &graph) {
 	}
 
 	//kernels total times
-	printf("\n******** Processed %d Node Graph In %0.5f ms *******\n", n_vertices, elapsedTime);
-	printf("\n******** Processed %d Node Graph In %0.5f sec *******\n", n_vertices, elapsedTime/1000);
+	//printf("\n******** Processed %d Node Graph In %0.5f ms *******\n", n_vertices, elapsedTime);
+	printf("\n******** OPT_3 Processed %d Node Graph In %0.5f sec *******\n", n_vertices, elapsedTime/1000);
 
 	//frees all the shit
 	free(adj);
@@ -1100,332 +1260,208 @@ __global__ void OPT_3_HIST(int* lcm, int* hist, int* lcmsizes, int n) {
 	}
 }
 
-//OPTIMIZATION 2 KERNELS & PREP
-void OPT_2_PREP(igraph_t &graph) {
-
-	//num vertices
-	int n_vertices = igraph_vcount(&graph);
-
-	//1D adj list graphs and sizes
-	int *adj;
-	int *adjsizes = (int*)malloc(sizeof(int)*(n_vertices + 1));
-	int lcmsizes;
-
-	//adj list shit
-	igraph_adjlist_t al;
+//OPTIMIZED 4 SATHYAS GPU 2
+int OPT_4_PREP(igraph_t &graph, igraph_neimode_t OUTALL, int numThreads)
+{
+    printf("\nAllocating Adjacency List\n");
+    int n_vertices = igraph_vcount(&graph);
+    igraph_adjlist_t al;
     igraph_adjlist_init(&graph, &al, OUTALL);
     igraph_adjlist_simplify(&al);
+
+    int **adjList2D;
+    int totalSize = 0;
+
+    int *adjList, *d_adjList;
+    int *sizeAdj, *d_sizeAdj;
+
+    int *lcmMatrix, *d_lcmMatrix;
+
+    int *d_LCMSize, *LCMSize, *LCMSize_Calc;
+
     igraph_vector_int_t *adjVec;
+    
+    adjList2D = (int **) calloc(n_vertices, sizeof(int *));
+    sizeAdj = (int *) malloc(n_vertices * sizeof(int));
+    LCMSize = (int *) malloc(n_vertices * sizeof(int));
+    LCMSize_Calc = (int *) malloc(n_vertices * sizeof(int));
+    memset(LCMSize, 0, n_vertices*sizeof(int));
+    memset(LCMSize_Calc, 0, n_vertices*sizeof(int));
+    printf("Computing Adjacency List - %d vertices...\n", n_vertices);
 
-	//figures out threads per block
-	int threads_max = 128;
-	int threads;
-	if(n_vertices > threads_max)
-		threads = threads_max;
-	else
-		threads = n_vertices;
+    for (int i = 0; i < n_vertices; i++) {
+        adjVec = igraph_adjlist_get(&al, i);
 
-	//histogram vars
-	int *hist;
-	hist = (int*)malloc(sizeof(int)*n_vertices);
-	memset(hist, 0, sizeof(int)*n_vertices);
+        // igraph_vector_t adjVec;
+        // igraph_vector_init(&adjVec, 0);
+        // igraph_neighbors(&graph, &adjVec, i, OUTALL);
 
-	//gets each vertex's number of neighbors and total neighbors
-	adjsizes[0] = 0;
-	for(int i = 1; i <= n_vertices; i++) {
+        adjList2D[i] = (int *) malloc(igraph_vector_int_size(adjVec) * sizeof(int));
+        sizeAdj[i] = (int) igraph_vector_int_size(adjVec);
+        totalSize += sizeAdj[i];
+        for(int k = 0; k< igraph_vector_int_size(adjVec); k++)
+        {
+            adjList2D[i][k] = (int) VECTOR(*adjVec)[k];
+        }
+    }
 
-		adjVec = igraph_adjlist_get(&al, i-1);
-		adjsizes[i] = igraph_vector_int_size(adjVec) + adjsizes[i-1];
+    for(int i = 0; i< n_vertices; i++)
+    {
+        qsort(adjList2D[i], sizeAdj[i], sizeof(int), compare);
+    }
+    
+    adjList = (int *) malloc(totalSize * sizeof(int));
+    int l = -1;
+    for (int q = 0; q < n_vertices; q++)
+    {
+        for (int t = 0; t < sizeAdj[q]; t++)
+        {
+            l++;
+            adjList[l] = adjList2D[q][t];
+        }
+    }
+    for(int i = 0; i< n_vertices; i++)
+    {
+        free(adjList2D[i]);
+        if(i>0)
+        {
+            sizeAdj[i] += sizeAdj[i - 1];
+        }
+    }
 
-	}
-
-	//creats jagged & flattened to 1D adj list	
-	adj = (int*)malloc(sizeof(int)*adjsizes[n_vertices]);
-
-	//creates 1d adj list
-	for(int i = 0; i < n_vertices; i++) {
-
-		adjVec = igraph_adjlist_get(&al, i);
-
-		for(int j = 0; j < adjsizes[i+1] - adjsizes[i]; j++)
-			adj[adjsizes[i] + j] = (int)VECTOR(*adjVec)[j];
-	}
-
-	//device vars
-	int *d_adj, *d_lcm, *d_adjsizes, *d_lcmsizes, *d_hist, *d_lcm_max;
-
-	//kernel execution time crap
+    //kernel execution time crap
 	float elapsedTime;
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
 	cudaEventRecord(start, 0);
+    
+    free(adjList2D);
+    // memset(LCMSize, 0, n_vertices*sizeof(int));
+    printf("%d-%d\n", totalSize, sizeAdj[n_vertices-1]);
+    printf("Got Adj List...\n Allocating on gpu mem...");
+    checkCudaError(cudaMalloc((void**)&d_adjList, totalSize * sizeof(int)), "Malloc Error d_adjList");
+    checkCudaError(cudaMalloc((void**)&d_sizeAdj, n_vertices * sizeof(int)), "Malloc Error d_sizeAdj");
+    checkCudaError(cudaMalloc((void**)&d_LCMSize, n_vertices * sizeof(int)), "Malloc Error d_sizeAdj");
 
-	//mallocs device shit
-	checkCudaError(cudaMalloc((void**)&d_adj, sizeof(int)*adjsizes[n_vertices]), "Malloc d_adj");
-	checkCudaError(cudaMalloc((void**)&d_adjsizes, sizeof(int)*(n_vertices+1)), "Malloc d_adjsizes");
-	checkCudaError(cudaMalloc((void**)&d_lcmsizes, sizeof(int)*(n_vertices+1)), "Malloc d_lcmsizes");
-	checkCudaError(cudaMalloc((void**)&d_lcm_max, sizeof(int)), "Malloc d_lcm_max");
+    cudaMemcpy(d_adjList, adjList, totalSize * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sizeAdj, sizeAdj, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_LCMSize, LCMSize_Calc, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
 
-	//copys adj list to device and initializes lcm to zero
-	checkCudaError(cudaMemcpy(d_adj, adj, sizeof(int)*adjsizes[n_vertices], cudaMemcpyHostToDevice), "Memcpy d_adj");
-	checkCudaError(cudaMemcpy(d_adjsizes, adjsizes, sizeof(int)*(n_vertices+1), cudaMemcpyHostToDevice), "Memcpy d_adjsizes");
-	checkCudaError(cudaMemset(d_lcmsizes, 0, sizeof(int)*(n_vertices+1)), "Memset d_lcmsizes");
-	//checkCudaError(cudaMemset(&d_lcm_max, 0, sizeof(int)), "Memset d_lcmsizes");
+    dim3 DimGrid(ceil(n_vertices/numThreads), 1, 1);   
+    if (n_vertices%numThreads) 
+    {
+        DimGrid.x++;
+    }
 
-	
+    dim3 DimBlock(numThreads, 1, 1);
+    int totLCMSize = 0;
+    printf("Launching Size Kernel...\n");
+    OPT_4_SIZES<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_LCMSize, n_vertices);
+    cudaThreadSynchronize();
+    cudaDeviceSynchronize();
+    checkCudaError(cudaGetLastError(), "Checking Last Error, Size Kernel Launch");
+    cudaMemcpy(LCMSize_Calc, d_LCMSize, n_vertices * sizeof(int), cudaMemcpyDeviceToHost);
+    
+    for(int i = 0; i<n_vertices; i++)
+    {
+        totLCMSize += LCMSize_Calc[i];
+        LCMSize[i] = LCMSize_Calc[i];
+    }
 
-	//SIZE OF SHIT
-	//printf("\nSize(adj) =     %ld Bytes\nSize(adjsize) = %ld Bytes\nSize(hist) =    %ld Bytes\nSize(lcm) =     %ld Bytes", sizeof(int)*adjsizes[n_vertices], sizeof(int)*(n_vertices + 1), sizeof(int)*n_vertices, sizeof(int)*n_vertices*n_vertices);
+    for(int i = 1; i<n_vertices; i++)
+    {
+        if(i>0)
+            LCMSize[i] += LCMSize[i - 1];
+    }
+    printf("%d - %d\n", totalSize, totLCMSize);
+    
+    lcmMatrix = (int *) malloc(totLCMSize * sizeof(int));
+    memset(lcmMatrix, 0, totLCMSize*sizeof(int));
+    checkCudaError(cudaMalloc((void**)&d_lcmMatrix, totLCMSize * sizeof(int)), "Malloc Error d_lcmMatrix");
+    cudaMemcpy(d_lcmMatrix, lcmMatrix, totLCMSize * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_LCMSize, LCMSize, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
+    printf("Launching LCM Kernel...\n");
+    
+    // LCM_Kernel<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_lcmMatrix, d_LCMSize, n_vertices);
+    OPT_4<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_lcmMatrix, d_LCMSize, n_vertices);
+    
+	cudaThreadSynchronize();
+    cudaDeviceSynchronize();
+    checkCudaError(cudaGetLastError(), "Checking Last Error, Kernel Launch");
+    printf("Copying to CPU Memory...\n");
+    checkCudaError(cudaMemcpy(lcmMatrix, d_lcmMatrix, totLCMSize * sizeof(int), cudaMemcpyDeviceToHost), "cudaMemcpy Error d_lcmMatrix");
+    // checkCudaError(cudaMemcpy(LCMSize, d_LCMSize, n_vertices * sizeof(int), cudaMemcpyDeviceToHost), "cudaMemcpy Error LCMSize");
+    
+    // cudaFree(d_lcmMatrix);
+    // cudaFree(d_LCMSize);
+    cudaFree(d_adjList);
+    cudaFree(d_sizeAdj);
+    free(sizeAdj);
+    free(adjList);
 
-	//lcm sizes kernel
-	OPT_3_SIZES<<<n_vertices, threads>>>(d_adj, d_lcmsizes, d_adjsizes, n_vertices);
-	checkCudaError(cudaGetLastError(), "Checking Last Error, OPT_3_SIZES Kernel Launch");
-	//cudaDeviceSynchronize();
-	OPT_3_SIZES_SUM<<<1,1>>>(d_lcmsizes, n_vertices);
-	checkCudaError(cudaGetLastError(), "Checking Last Error, OPT_3_SIZES_SUM Kernel Launch");
-	//cudaDeviceSynchronize();
+    printf("Allocating Histogram...\n");
+    int *histo, *d_histogram;
+    histo = (int *) malloc(n_vertices * sizeof(int));
+    memset(histo, 0, sizeof(int)*n_vertices);
+    checkCudaError(cudaMalloc((void**)&d_histogram, n_vertices * sizeof(int)), "Malloc Error d_histogram");
+    cudaMemcpy(d_histogram, histo, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
 
-	// //kernel execution stop
-	// cudaEventRecord(stop, 0);
-	// cudaEventSynchronize(start);
-	// cudaEventSynchronize(stop);
-	// cudaEventElapsedTime(&elapsedTime, start, stop);
-	// cudaEventDestroy(start);
-	// cudaEventDestroy(stop);
+    printf("Sorting LCM...\n");
+    
+	for(int i = 0; i< n_vertices; i++)
+	{
+		int offset = 0;
+		if(i > 0)
+		{
+			offset = LCMSize[i - 1];
+		}
+		qsort(lcmMatrix + offset, LCMSize_Calc[i], sizeof(int), compare);
+	}
 
-	//creates lcm adj list shit
-	checkCudaError(cudaMemcpy(&lcmsizes, &d_lcmsizes[n_vertices], sizeof(int), cudaMemcpyDeviceToHost), "Memcpy d_lcmsizes to lcmsizes");
-	checkCudaError(cudaMalloc((void**)&d_lcm, sizeof(int)*lcmsizes), "Malloc d_lcm");
-	checkCudaError(cudaMemset(d_lcm, 0, sizeof(int)*lcmsizes), "Memset d_lcm");
+    cudaMemcpy(d_lcmMatrix, lcmMatrix, totLCMSize * sizeof(int), cudaMemcpyHostToDevice);
 
-	// //kernel execution time crap 2
-	// float elapsedTime3;
-	// cudaEvent_t start3, stop3;
-	// cudaEventCreate(&start3);
-	// cudaEventCreate(&stop3);
-	// cudaEventRecord(start3, 0);
+	printf("Computing Histogram...\n");
+	// return 0;
+    printf("Launching Histogram Kernel...\n");
+    
+    OPT_4_HIST<<<DimGrid,DimBlock>>>(d_lcmMatrix, d_LCMSize, d_histogram, n_vertices);
+    cudaThreadSynchronize();
+    cudaDeviceSynchronize();
+    checkCudaError(cudaGetLastError(), "Checking Last Error, Kernel Launch");
+    printf("Copying to CPU Memory...\n");
+    checkCudaError(cudaMemcpy(histo, d_histogram, n_vertices * sizeof(int), cudaMemcpyDeviceToHost), "cudaMemcpy Error d_lcmMatrix");
 
-	//get lcm shit
-	int alt_threads = 128;
-	OPT_3<<<ceil((float)n_vertices/alt_threads), alt_threads>>>(d_adj, d_lcm, d_adjsizes, d_lcmsizes, n_vertices);
-	checkCudaError(cudaGetLastError(), "Checking Last Error, OPT_3 Kernel Launch");
-
-	//DEBUG HIST
-	// int *lcm = (int*)malloc(sizeof(int)*lcmsizes);
-	// int *lsizes = (int*)malloc(sizeof(int)*(n_vertices+1));
-	// cudaMemcpy(lcm, d_lcm, sizeof(int)*lcmsizes, cudaMemcpyDeviceToHost);
-	// cudaMemcpy(lsizes, d_lcmsizes, sizeof(int)*(n_vertices+1), cudaMemcpyDeviceToHost);
-	// for(int i = 0; i < n_vertices; i++) {
-
-	// 	int count = 0;
-
-	// 	for(int j = 0; j < n_vertices; j++) {
-
-	// 		if(lsizes[i+1] - lsizes[i] != lsizes[j+1] - lsizes[j])
-	// 			continue;
-			
-	// 		bool equal = false;
-
-	// 		for(int k = 0; k < lsizes[i+1] - lsizes[i]; k++) {
-
-	// 			if(lcm[lsizes[i] + k] == lcm[lsizes[j] + k])
-	// 				equal = true;
-	// 			else {
-	// 				equal = false;
-	// 				break;
-	// 			}
-	// 		}
-
-	// 		if(equal)
-	// 			++count;
-	// 	}
-
-	// 	++hist[count];
-	// }
-	// free(lcm);
-	// free(lsizes);
-
-	//histogram
-	cudaFree(d_adj);
-	cudaFree(d_adjsizes);
-	checkCudaError(cudaMalloc((void**)&d_hist, sizeof(int)*n_vertices), "Malloc d_hist");
-	checkCudaError(cudaMemset(d_hist, 0, sizeof(int)*n_vertices), "Memset d_hist");
-	OPT_3_HIST<<<n_vertices, threads>>>(d_lcm, d_hist, d_lcmsizes, n_vertices);
-	checkCudaError(cudaGetLastError(), "Checking Last Error, OPT_3_HIST Kernel Launch");
-	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*n_vertices, cudaMemcpyDeviceToHost), "D_HIST TO HOST");
-
-	//kernel execution stop
+    //kernel execution stop
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(start);
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&elapsedTime, start, stop);
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
+    
+    printf("Finished Histogram...\n");
+    for(int i = 1; i < n_vertices; i++) {
+        if ((long) (histo[i] / i) > 0)
+            printf("%d    %d\n", i, (int) (histo[i] / i));
+    }
 
-	//prints gpu histogram
-	printf("\nGPU OPT 2 HISTOGRAM\n");
-	for(int i = 1; i < n_vertices; i++) {
-		if ((hist[i] / i) > 0)
-			printf("%d    %d\n", i, (hist[i] / i));
-	}
+    //kernels total times
+	//printf("\n******** Processed %d Node Graph In %0.5f ms *******\n", n_vertices, elapsedTime);
+	printf("\n******** OPT_4 Processed %d Node Graph In %0.5f sec *******\n", n_vertices, elapsedTime/1000);
 
-	//kernels total times
-	printf("\n******** Processed %d Node Graph In %0.5f ms *******\n", n_vertices, elapsedTime);
-	printf("\n******** Processed %d Node Graph In %0.5f sec *******\n", n_vertices, elapsedTime/1000);
-
-	//frees all the shit
-	free(adj);
-	free(hist);
-	free(adjsizes);
-	cudaFree(d_hist);
-	cudaFree(d_lcm);
-	cudaFree(d_lcmsizes);
+	//frees stuff
+    free(lcmMatrix);
+    free(LCMSize_Calc);
+    free(LCMSize);
+    free(histo);
+    cudaFree(d_histogram);
+    cudaFree(d_lcmMatrix);
+    cudaFree(d_LCMSize);
+	return 0;
 }
 
-//
-__global__ void OPT_2_SIZES(int* adj, int* lcmsizes, int* sizes, int n) {
-
-	int vertex = blockIdx.x;
-	int vcomp = threadIdx.x;
-	int cval;
-
-	if(vertex < n && vcomp < n)
-	for(int i = vcomp; i < n; i += blockDim.x) {
-
-		//skips to next vertex
-		if(vertex == i) {
-			continue;
-		}
-
-		//resets count
-		cval = 0;
-
-		//for loop that goes through vertex neighbors
-		for(int j = 0; j < sizes[vertex + 1] - sizes[vertex]; j++) {
-
-			//loop compares to other vertex i/vcomp
-			for(int k = 0; k < sizes[i+1] - sizes[i]; k++) {
-
-				if(adj[sizes[vertex] + j] == adj[sizes[i] + k]) {
-
-					++cval;
-					break;
-				}
-			}
-
-			if(cval > 0) {
-				atomicAdd(&lcmsizes[vertex + 1], 1);
-				break;
-			}
-		}
-	}
-}
-
-//
-__global__ void OPT_2_SIZES_SUM(int* lcmsizes, int n) {
-
-	for(int i = 0; i < n; i++)
-		lcmsizes[i+1] += lcmsizes[i];
-}
-
-//
-__global__ void OPT_2(int* adj, int* lcm, int* sizes, int* lcmsizes, int n) {
-
-	int vertex = threadIdx.x + blockIdx.x*blockDim.x;
-	int cval;
-	int pos = 0;
-
-	if(vertex < n)
-	for(int i = 0; i < n; i++) {
-
-		if(vertex == i) {
-			continue;
-		}
-
-		//resets count
-		cval = 0;
-
-		//for loop that goes through vertex neighbors
-		for(int j = 0; j < sizes[vertex + 1] - sizes[vertex]; j++) {
-
-			//loop compares to other vertex i/vcomp
-			for(int k = 0; k < sizes[i+1] - sizes[i]; k++) {
-
-				if(adj[sizes[vertex] + j] == adj[sizes[i] + k]) {
-
-					++cval;
-					break;
-				}
-			}
-		}
-
-		//copies to array
-		if(cval > 0) {
-			atomicAdd(&lcm[lcmsizes[vertex] + pos], cval);
-			++pos;
-		}
-	}
-
-	//sorts vertex lcm once block is done
-	if(vertex < n)
-		thrust::sort(thrust::device, &lcm[lcmsizes[vertex]], &lcm[lcmsizes[vertex+1]]);
-}
-
-//
-__global__ void OPT_2_HIST(int* lcm, int* hist, int* lcmsizes, int n) {
-
-	//
-	int vertex = blockIdx.x;
-	int vcomp = threadIdx.x;
-	bool equal;
-	
-	//
-	__shared__ int cval;
-
-	//
-	if(vcomp == 0)
-		cval = 0;
-	__syncthreads();
-
-	//
-	if(vertex < n && vcomp < n)
-	for(int i = vcomp; i < n; i += blockDim.x) {
-
-		if(vertex == i) {
-			atomicAdd(&cval, 1);
-			continue;
-		}
-
-		if((lcmsizes[vertex+1] - lcmsizes[vertex]) != (lcmsizes[i+1] - lcmsizes[i]))
-			continue;
-		
-		equal = false;
-
-		for(int j = 0; j < lcmsizes[vertex+1] - lcmsizes[vertex]; j++) {
-
-			if(lcm[lcmsizes[vertex] + j] == lcm[lcmsizes[i] + j])
-				equal = true;
-			
-			else {
-				equal = false;
-				break;
-			}
-		}
-
-		if(equal)
-			atomicAdd(&cval, 1);
-	}
-
-	__syncthreads();
-	if(vertex < n && vcomp == 0 && cval > 0) {
-		atomicAdd(&hist[cval], 1);
-		//printf("\nv%d: %d\n", vertex, cval);
-	}
-}
-
-
-__global__ void Get_LCMSize_Kernel(int *d_adjList, int *d_sizeAdj, int *d_LCMSize, int n_vertices)
+__global__ void OPT_4_SIZES(int *d_adjList, int *d_sizeAdj, int *d_LCMSize, int n_vertices)
 {
     int i = threadIdx.x + blockDim.x * blockIdx.x;     
     if(i<n_vertices)
@@ -1466,7 +1502,7 @@ __global__ void Get_LCMSize_Kernel(int *d_adjList, int *d_sizeAdj, int *d_LCMSiz
                         jStart++;
                         iStart++;
                         compVec++;
-                        // break;
+                        break;
                     }
             }
 
@@ -1484,7 +1520,7 @@ __global__ void Get_LCMSize_Kernel(int *d_adjList, int *d_sizeAdj, int *d_LCMSiz
 
 }
 
-__global__ void Get_LCM_Kernel(int *d_adjList, int *d_sizeAdj, int *d_lcmMatrix, int *d_LCMSize, int n_vertices)
+__global__ void OPT_4(int *d_adjList, int *d_sizeAdj, int *d_lcmMatrix, int *d_LCMSize, int n_vertices)
 {
     int i = threadIdx.x + blockDim.x * blockIdx.x;     
     if(i<n_vertices)
@@ -1551,200 +1587,36 @@ __global__ void Get_LCM_Kernel(int *d_adjList, int *d_sizeAdj, int *d_lcmMatrix,
 
 }
 
-
-__global__ void LCM_Hist_Kernel(int *d_lcmMatrix, int n_vertices)
+__global__ void OPT_4_HIST(int *d_lcmMatrix, int *d_LCMSize, int *d_histogram, int n_vertices)
 {
-    
-}
-
-int LCM_Kernel_Prep(igraph_t &graph, igraph_neimode_t OUTALL, int numThreads)
-{
-    printf("Allocating Adjacency List\n");
-    int n_vertices = igraph_vcount(&graph);
-    igraph_adjlist_t al;
-    igraph_adjlist_init(&graph, &al, OUTALL);
-    igraph_adjlist_simplify(&al);
-
-    int **adjList2D;
-    int totalSize = 0;
-
-    int *adjList, *d_adjList;
-    int *sizeAdj, *d_sizeAdj;
-
-    int *lcmMatrix, *d_lcmMatrix;
-
-    int *d_LCMSize, *LCMSize, *LCMSize_Calc;
-    
-    adjList2D = (int **) calloc(n_vertices, sizeof(int *));
-    sizeAdj = (int *) malloc(n_vertices * sizeof(int));
-    LCMSize = (int *) malloc(n_vertices * sizeof(int));
-    LCMSize_Calc = (int *) malloc(n_vertices * sizeof(int));
-    memset(LCMSize, 0, n_vertices*sizeof(int));
-    memset(LCMSize_Calc, 0, n_vertices*sizeof(int));
-    printf("Computing Adjacency List - %d vertices...\n", n_vertices);
-
-    for (int i = 0; i < n_vertices; i++) {
-        igraph_vector_int_t *adjVec = igraph_adjlist_get(&al, i);
-
-        // igraph_vector_t adjVec;
-        // igraph_vector_init(&adjVec, 0);
-        // igraph_neighbors(&graph, &adjVec, i, OUTALL);
-
-        adjList2D[i] = (int *) malloc(igraph_vector_int_size(adjVec) * sizeof(int));
-        sizeAdj[i] = (int) igraph_vector_int_size(adjVec);
-        totalSize += sizeAdj[i];
-        for(int k = 0; k< igraph_vector_int_size(adjVec); k++)
-        {
-            adjList2D[i][k] = (int) VECTOR(*adjVec)[k];
-        }
-    }
-
-    for(int i = 0; i< n_vertices; i++)
-    {
-        qsort(adjList2D[i], sizeAdj[i], sizeof(int), compare);
-    }
-    
-    adjList = (int *) malloc(totalSize * sizeof(int));
-    int l = -1;
-    for (int q = 0; q < n_vertices; q++)
-    {
-        for (int t = 0; t < sizeAdj[q]; t++)
-        {
-            l++;
-            adjList[l] = adjList2D[q][t];
-        }
-    }
-    for(int i = 0; i< n_vertices; i++)
-    {
-        free(adjList2D[i]);
-        if(i>0)
-        {
-            sizeAdj[i] += sizeAdj[i - 1];
-        }
-    }
-    
-    free(adjList2D);
-    // memset(LCMSize, 0, n_vertices*sizeof(int));
-    printf("%d-%d\n", totalSize, sizeAdj[n_vertices-1]);
-    printf("Got Adj List...\n Allocating on gpu mem...");
-    checkCudaError(cudaMalloc((void**)&d_adjList, totalSize * sizeof(int)), "Malloc Error d_adjList");
-    checkCudaError(cudaMalloc((void**)&d_sizeAdj, n_vertices * sizeof(int)), "Malloc Error d_sizeAdj");
-    checkCudaError(cudaMalloc((void**)&d_LCMSize, n_vertices * sizeof(int)), "Malloc Error d_sizeAdj");
-
-    cudaMemcpy(d_adjList, adjList, totalSize * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_sizeAdj, sizeAdj, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_LCMSize, LCMSize_Calc, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
-
-    dim3 DimGrid(ceil(n_vertices/numThreads), 1, 1);   
-    if (n_vertices%numThreads) 
-    {
-        DimGrid.x++;
-    }
-
-    dim3 DimBlock(numThreads, 1, 1);
-    int totLCMSize = 0;
-    printf("Launching Size Kernel...\n");
-    Get_LCMSize_Kernel<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_LCMSize, n_vertices);
-    cudaThreadSynchronize();
-    cudaDeviceSynchronize();
-    checkCudaError(cudaGetLastError(), "Checking Last Error, Size Kernel Launch");
-    cudaMemcpy(LCMSize_Calc, d_LCMSize, n_vertices * sizeof(int), cudaMemcpyDeviceToHost);
-    
-    for(int i = 0; i<n_vertices; i++)
-    {
-        totLCMSize += LCMSize_Calc[i];
-        LCMSize[i] = LCMSize_Calc[i];
-    }
-
-    for(int i = 1; i<n_vertices; i++)
-    {
-        if(i>0)
-            LCMSize[i] += LCMSize[i - 1];
-    }
-    printf("%d - %d\n", totalSize, totLCMSize);
-    
-    lcmMatrix = (int *) malloc(totLCMSize * sizeof(int));
-    memset(lcmMatrix, 0, totLCMSize*sizeof(int));
-    checkCudaError(cudaMalloc((void**)&d_lcmMatrix, totLCMSize * sizeof(int)), "Malloc Error d_lcmMatrix");
-    cudaMemcpy(d_lcmMatrix, lcmMatrix, totLCMSize * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_LCMSize, LCMSize, n_vertices * sizeof(int), cudaMemcpyHostToDevice);
-    printf("Launching LCM Kernel...\n");
-    
-    // LCM_Kernel<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_lcmMatrix, d_LCMSize, n_vertices);
-    Get_LCM_Kernel<<<DimGrid,DimBlock>>>(d_adjList, d_sizeAdj, d_lcmMatrix, d_LCMSize, n_vertices);
-    
-	cudaThreadSynchronize();
-    cudaDeviceSynchronize();
-    checkCudaError(cudaGetLastError(), "Checking Last Error, Kernel Launch");
-    printf("Copying to CPU Memory...\n");
-    checkCudaError(cudaMemcpy(lcmMatrix, d_lcmMatrix, totLCMSize * sizeof(int), cudaMemcpyDeviceToHost), "cudaMemcpy Error d_lcmMatrix");
-    // checkCudaError(cudaMemcpy(LCMSize, d_LCMSize, n_vertices * sizeof(int), cudaMemcpyDeviceToHost), "cudaMemcpy Error LCMSize");
-    
-    cudaFree(d_lcmMatrix);
-    cudaFree(d_LCMSize);
-    cudaFree(d_adjList);
-    cudaFree(d_sizeAdj);
-    free(sizeAdj);
-    free(adjList);
-
-    printf("Allocating Histogram...\n");
-    int *histo;
-    histo = (int *) malloc(n_vertices * sizeof(int));
-    memset(histo, 0, sizeof(int)*n_vertices);
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
     int count = 0, countMax = -1;
-    // int *neisVec1, *neisVec2;
-    // neisVec1 = (int *) malloc(1 * sizeof(int));
-    // neisVec2 = (int *) malloc(1 * sizeof(int));
-   
-    printf("Sorting LCM...\n");
-    // int totLCMSize1 = 0;
-
-/*
-    for(int i = 1; i< n_vertices; i++)
-    {
-    	LCMSize[i] += LCMSize[i-1];
-    }
-*/
-    
-	for(int i = 0; i< n_vertices; i++)
-	{
-		int offset = 0;
-		if(i > 0)
-		{
-			offset = LCMSize[i - 1];
-		}
-		// printf("%d - %d\n", offset, LCMSize_Calc[i]);
-		qsort(lcmMatrix + offset, LCMSize_Calc[i], sizeof(int), compare);
-		// totLCMSize1 += LCMSize[i];
-	}
-	// for(int i = 0; i<LCMSize_Calc[4000]; i++)
-	// 	printf("%d-", lcmMatrix[LCMSize[3999] + i]);
-	printf("Computing Histogram...\n");
-	// return 0;
-    for(int i = 0; i< n_vertices; i++)
+  
+    if(i<n_vertices)
     {
         int iStart = 0;
         if(i>0)
-            iStart = LCMSize[i - 1]; //Offset
+            iStart = d_LCMSize[i - 1]; //Offset
         count = 0;
+        int iSize = d_LCMSize[i] - iStart;
 
         for(int j = 0; j < n_vertices; j++) {
-            if(LCMSize_Calc[i] != LCMSize_Calc[j])
-                continue;
-            
             int jStart = 0;
-            
             if(j>0)
-                jStart = LCMSize[j - 1]; //Offset
-            
+                jStart = d_LCMSize[j - 1]; //Offset
+
+            int jSize = d_LCMSize[j] - jStart;
+            if(iSize != jSize)
+                continue;
+      
             int eq = 1;
-            for(int k = 0; k < LCMSize_Calc[i]; k++)
+            for(int k = 0; k < iSize; k++)
             {
-            	if(lcmMatrix[iStart + k] != lcmMatrix[jStart + k])
-            	{
-            		eq = 0;
-            		break;
-            	}
+                if(d_lcmMatrix[iStart + k] != d_lcmMatrix[jStart + k])
+                {
+                    eq = 0;
+                    break;
+                }
             }
             if(eq == 1)
             {               
@@ -1754,16 +1626,282 @@ int LCM_Kernel_Prep(igraph_t &graph, igraph_neimode_t OUTALL, int numThreads)
 
         if(countMax < count)
             countMax = count;
-        histo[count]++;
+        atomicAdd((int*)&d_histogram[count], 1);
+        // d_histogram[count]++;
     }
-    printf("Finished Histogram...\n");
-    for(int i = 1; i <= countMax; i++) {
-        if ((long) (histo[i] / i) > 0)
-            printf("%d    %d\n", i, (int) (histo[i] / i));
+}
+
+//OPTIMIZED CPU CODE
+void LCM_CPU(igraph_t &graph, igraph_neimode_t OUTALL)
+{
+	int n_vertices = igraph_vcount(&graph);
+	igraph_adjlist_t al;
+	igraph_adjlist_init(&graph, &al, OUTALL);
+	igraph_adjlist_simplify(&al);
+
+	long int **adjList;
+	int *sizeAdj;
+	igraph_vector_int_t *adjVec;
+
+	adjList = (long int **) calloc(n_vertices, sizeof(long int *));
+	sizeAdj = (int *) calloc(n_vertices, sizeof(int));
+	for (int i = 0; i < n_vertices; i++) {
+		adjVec = igraph_adjlist_get(&al, i);
+
+		adjList[i] = (long int *) calloc(igraph_vector_int_size(adjVec), sizeof(long int));
+		sizeAdj[i] = (int) igraph_vector_int_size(adjVec);
+		for(int k = 0; k< igraph_vector_int_size(adjVec); k++)
+		{
+			adjList[i][k] = (long int) VECTOR(*adjVec)[k];
+		}
+	}
+
+	for(int i = 0; i< n_vertices; i++)
+	{
+		qsort(adjList[i], sizeAdj[i], sizeof(long int), compare);
+	}
+
+	LCM_CPU_Kernel(adjList, sizeAdj, n_vertices);
+}
+
+void LCM_CPU_Kernel(long int **adjList, int *sizeAdj, int n_vertices)
+{
+	Array *lcmMatrix;
+	lcmMatrix = (Array *) calloc(n_vertices, sizeof(Array));
+	for(int i = 0; i < n_vertices; i++) {
+		initArray(&lcmMatrix[i], sizeAdj[i]);
+	}
+	//finds similar vertices
+	for(int i = 0; i < n_vertices; i++) {
+		
+		long int* neisVec1 = adjList[i];
+		//inner loop
+		for(int j = i+1; j < n_vertices; j++) {
+			long int* neisVec2 = adjList[j];
+			int compVec = commonNeighbor(neisVec1, neisVec2, sizeAdj[i], sizeAdj[j]);
+			if (compVec > 0)
+			{
+				insertArray(&lcmMatrix[i], compVec);
+				insertArray(&lcmMatrix[j], compVec);
+			}
+		}
+	}
+	printf("Finished Computing LCM\n");
+	for(int i = 0; i < n_vertices; i++) {
+		qsort(lcmMatrix[i].array, lcmMatrix[i].used, sizeof(int), compare);
+		// printf("%d:\t", i);
+		// for(int j=0;j < lcmMatrix[i].used; j++)
+		// {
+		// 	printf("%d-", lcmMatrix[i].array[j]);
+		// }
+		// printf("\n");
+	}
+	
+	long int histo[n_vertices];
+	memset(histo, 0, sizeof(long int)*n_vertices);
+	int count = 0, countMax = -1;
+
+	for(int i = 0; i < n_vertices; i++) {
+		count = 0;
+		for(int j = 0; j < n_vertices; j++) {
+			if(lcmMatrix[i].used != lcmMatrix[j].used)
+				continue;
+			int eq = equalArray(lcmMatrix[i],lcmMatrix[j]);
+			if(eq == 1)
+			{				
+				count++;
+			}
+		}
+
+		if(countMax < count)
+			countMax = count;
+		histo[count]++;
+	}
+
+	for(int i = 1; i <= countMax; i++) {
+		if ((long) (histo[i] / i) > 0)
+			printf("%d    %ld\n", i, (long) (histo[i] / i));
+	}
+
+}
+
+void initArray(Array *a, size_t initialSize) {
+  a->array = (int *)malloc(initialSize * sizeof(int));
+  a->used = 0;
+  a->size = initialSize;
+}
+
+void insertArray(Array *a, int element) {
+  // a->used is the number of used entries, because a->array[a->used++] updates a->used only *after* the array has been accessed.
+  // Therefore a->used can go up to a->size 
+  if (a->used == a->size) {
+    a->size *= 2;
+    a->array = (int *)realloc(a->array, a->size * sizeof(int));
+  }
+  a->array[a->used++] = element;
+}
+
+void freeArray(Array *a) {
+  free(a->array);
+  a->array = NULL;
+  a->used = a->size = 0;
+}
+
+int commonNeighbor(long int arr1[], long int arr2[], int m, int n)
+{
+  int i = 0, j = 0;
+  int numCommon = 0;
+  while (i < m && j < n)
+  {
+    if (arr1[i] < arr2[j])
+      i++;
+    else if (arr2[j] < arr1[i])
+      j++;
+    else /* if arr1[i] == arr2[j] */
+    {
+      // printf(" %d ", arr2[j++]);
+      j++;
+      i++;
+      numCommon++;
     }
-    free(lcmMatrix);
-    free(LCMSize_Calc);
-    free(LCMSize);
-    free(histo);
-	return 0;
+  }
+  return numCommon;
+}
+
+int equalArray(Array a1, Array a2)
+{
+	if( a1.used != a2.used)
+	{
+		return 0;
+	}
+	for(int i = 0; i < a1.used; i++)
+	{
+		if(a1.array[i] != a2.array[i])
+			return 0;
+	}
+	return 1;
+
+}
+
+int compare(const void* a, const void* b) {
+	return ( *(int*)a - *(int*)b );
+}
+
+//naive cpu version, slow and takes a shit load of host memory
+//uses adjacency matrix on cpu
+void LCM_cpu_baseline(igraph_t &graph) {
+
+	//gets num vertices and allocates, sets to zero adj matrix
+	int n_vertices = igraph_vcount(&graph), vsize;
+	int *matrix = (int *)malloc(n_vertices*n_vertices*sizeof(int));
+	memset(matrix, 0, sizeof(int)*n_vertices*n_vertices);
+
+	//graph vector and initializes it to zero
+	igraph_vector_t vec;
+	igraph_vector_init(&vec, 0);
+
+	//builds adj matrix
+	for(int i = 0; i < n_vertices; i++) {
+
+		//grabs neighbors and size
+		igraph_neighbors(&graph, &vec, i, OUTALL);
+		vsize = igraph_vector_size(&vec);
+
+		//adds ones where its adjacent
+		for(int j = 0; j < vsize; j++) {
+
+			matrix[i*n_vertices + (int)VECTOR(vec)[j]] = 1;
+		}
+	}
+
+	//result adj matrix set to zero
+	int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
+	memset(result, 0, sizeof(int)*n_vertices*n_vertices);
+	int cval;
+
+	//multiplies it against itself
+	for(int i = 0; i < n_vertices; i++) {
+
+		for(int j = i+1; j < n_vertices; j++) {
+
+			cval = 0;
+
+			for(int k = 0; k < n_vertices; k++)
+				cval += matrix[i*n_vertices + k] * matrix[k*n_vertices + j];
+
+			//enters val and transposes
+			result[i*n_vertices + j] = cval;
+			result[j*n_vertices + i] = cval;
+		}
+
+		//sorts the vertice/row
+		qsort(&result[i*n_vertices], n_vertices + 0, sizeof(int), compare);
+	}
+
+	//multiplies it against itself, REALL SLOW CODE LOL
+	// int *result = (int *)malloc(n_vertices*n_vertices*sizeof(int));
+	// memset(result, 0, sizeof(int)*n_vertices*n_vertices);
+	// int cval;
+
+	// for(int i = 0; i < n_vertices; i++) {
+
+	// 	for(int j = 0; j < n_vertices; j++) {
+
+	// 		cval = 0;
+
+	// 		for(int k = 0; k < n_vertices; k++) {
+
+	// 			cval += matrix[i*n_vertices + k] * matrix[k*n_vertices + j];
+	// 		}
+
+	// 		result[i*n_vertices + j] = cval;
+	// 	}
+
+	// 	qsort(&result[i*n_vertices], n_vertices +1, sizeof(int), compare);
+	// }
+
+	//histogram
+	bool equal;
+	int count, countMax = -1;
+	int *hist = (int*)malloc(sizeof(int) * n_vertices);
+	memset(hist, 0, sizeof(int)*n_vertices);
+
+	for(int i = 0; i < n_vertices; i++) {
+
+		count = 0;
+
+		for(int j = 0; j < n_vertices; j++) {
+
+			equal = false;
+
+			for(int k = 0; k < n_vertices; k++) {
+
+				if(result[i*n_vertices + k] == result[j*n_vertices + k])
+					equal = true;
+				else {
+					equal = false;
+					break;
+				}
+			}
+
+			if(equal)
+				++count;
+		}
+		if(countMax < count)
+				countMax = count;
+
+		++hist[count];
+	}
+
+	//prints results
+	printf("\nCPU Naive Histogram\n");
+	for(int i = 1; i <= countMax; i++) {
+		if ((long) (hist[i] / i) > 0)
+			printf("%d    %ld\n", i, (long) (hist[i] / i));
+	}
+
+	//frees shit
+	free(matrix);
+	free(result);
+	free(hist);
 }

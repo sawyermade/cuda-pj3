@@ -19,9 +19,16 @@ void Naive_Prep(igraph_t &graph);
 __global__ void Naive(int* d_matrix, int* d_result, int n_vertices);
 __global__ void Naive_Hist(int* d_result, int* d_hist, int n_vertices);
 
-//TEST KERNELS & PREP
-void TEST_PREP(igraph_t &graph);
-__global__ void TEST(int* adj, int* lcm, int* sizes, int n);
+//OPTIMIZATION 1 KERNELS & PREP
+void OPT_1_PREP(igraph_t &graph);
+__global__ void OPT_1(int* adj, int* lcm, int* sizes, int n);
+__global__ void OPT_1_HIST(int* lcm, int* hist, int n);
+
+//OPTIMIZATION 2 KERNELS & PREP
+void OPT_2_PREP(igraph_t &graph);
+__global__ void OPT_2_SIZES(int* adj, int* lcmsizes, int* sizes, int n);
+__global__ void OPT_2(int* adj, int* lcm, int* sizes, int* lcmsizes, int n);
+__global__ void OPT_2_HIST(int* lcm, int* hist, int* lcmsizes, int n);
 
 //CUDA ERROR
 void checkCudaError(cudaError_t e, const char* in);
@@ -80,10 +87,10 @@ int main(int argc, char** argv) {
 	gettimeofday(&stop, NULL);
 	printf("CPU Optimized Running Time: %2f\n", (stop.tv_sec - start.tv_sec) * 1000.0f + (stop.tv_usec - start.tv_usec) / 1000.0f);
 
-	//gpu naive
-	Naive_Prep(graph);
-	//Naive_Test();
-	//TEST_PREP();
+	//gpu shit
+	//Naive_Prep(graph);
+	//OPT_1_PREP(graph);
+	OPT_2_PREP(graph);
 	
 	
 	return 0;
@@ -470,33 +477,37 @@ void linkage_covariance(igraph_t &graph) {
 void checkCudaError(cudaError_t e, const char* in) {
 	if (e != cudaSuccess) {
 		printf("CUDA Error: %s, %s \n", in, cudaGetErrorString(e));
-		exit(EXIT_FAILURE);
+		//exit(EXIT_FAILURE);
 	}
 }
 
 //TEST PREP & KERNEL
-void TEST_PREP(igraph_t &graph) {
-	
+void OPT_1_PREP(igraph_t &graph) {
+
 	//num vertices
 	int n_vertices = igraph_vcount(&graph);
 
 	//1D adj list graphs and sizes
 	int *adj;
-	int *adjsizes = (int*)malloc(sizeof(int)*n_vertices);
-	int totalsize = 0;
+	int *adjsizes = (int*)malloc(sizeof(int)*(n_vertices + 1));
 
 	//vector for single vertices adj list
 	igraph_vector_t neisVec;
+	igraph_vector_init(&neisVec, 0);
 
 	//gets each vertex's number of neighbors and total neighbors
-	for(int i = 0; i < n_vertices; totalsize += adjsizes[i++]) {
-		
-		igraph_neighbors(&graph, &neisVec, i, OUTALL);
-		adjsizes[i] = igraph_vector_size(&neisVec);
+	adjsizes[0] = 0;
+	for(int i = 1; i <= n_vertices; i++) {
+
+		igraph_neighbors(&graph, &neisVec, i-1, OUTALL);
+		adjsizes[i] = igraph_vector_size(&neisVec) + adjsizes[i-1];
+
 	}
 
+	
+
 	//creats jagged & flattened to 1D adj list	
-	adj = (int*)malloc(sizeof(int)*totalsize);
+	adj = (int*)malloc(sizeof(int)*adjsizes[n_vertices]);
 
 	//creates 1d adj list
 	for(int i = 0; i < n_vertices; i++) {
@@ -505,29 +516,42 @@ void TEST_PREP(igraph_t &graph) {
 		igraph_neighbors(&graph, &neisVec, i, OUTALL);
 
 		//loads in vertice i's adjancent neighbors
-		for(int j = 0; j < adjsizes[i]; j++) {
+		//printf("\n%d: ", i);
+		for(int j = 0; j < adjsizes[i+1] - adjsizes[i]; j++) {
 			
-			if(i == 0)
-				adj[j] = (int)VECTOR(neisVec)[j];
+			adj[adjsizes[i] + j] = (int)VECTOR(neisVec)[j];
 
-			else
-				adj[i*adjsizes[i-1] + j] = (int)VECTOR(neisVec)[j];
+			//printf("[%d, %d] ", adj[adjsizes[i] + j], (int)VECTOR(neisVec)[j]);
 		}
 	}
 
+
+
 	//device vars
-	int *d_adj, *d_lcm, *d_adjsizes;
+	int *d_adj, *d_lcm, *d_adjsizes, *d_hist;
+
+	//histogram vars
+	int *hist;
+	hist = (int*)malloc(sizeof(int)*n_vertices);
+	memset(hist, 0, sizeof(int)*n_vertices);
 
 	//mallocs and copys
-	cudaMalloc((void**)&d_adj, sizeof(int)*totalsize);
-	cudaMalloc((void**)&d_lcm, sizeof(int)*totalsize);
-	cudaMalloc((void**)&d_adjsizes, sizeof(int)*n_vertices);
+	checkCudaError(cudaMalloc((void**)&d_adj, sizeof(int)*adjsizes[n_vertices]), "Malloc d_adj");
+	checkCudaError(cudaMalloc((void**)&d_adjsizes, sizeof(int)*(n_vertices+1)), "Malloc d_adjsizes");
+	checkCudaError(cudaMalloc((void**)&d_lcm, sizeof(int)*n_vertices*n_vertices), "Malloc d_lcm");
 
 	//copys adj list to device and initializes lcm to zero
-	cudaMemcpy(d_adj, adj, sizeof(int)*totalsize, cudaMemcpyHostToDevice);
-	cudaMemset(d_lcm, 0, sizeof(int)*totalsize);
-	cudaMemcpy(d_adjsizes, adjsizes, sizeof(int)*n_vertices, cudaMemcpyHostToDevice);
-	
+	checkCudaError(cudaMemcpy(d_adj, adj, sizeof(int)*adjsizes[n_vertices], cudaMemcpyHostToDevice), "Memcpy d_adj");
+	checkCudaError(cudaMemcpy(d_adjsizes, adjsizes, sizeof(int)*(n_vertices+1), cudaMemcpyHostToDevice), "Memcpy d_adjsizes");
+	checkCudaError(cudaMemset(d_lcm, 0, sizeof(int)*n_vertices*n_vertices), "Memset d_lcm");
+
+	//device histogram stuff
+	checkCudaError(cudaMalloc((void**)&d_hist, sizeof(int)*n_vertices), "Malloc d_hist");
+	checkCudaError(cudaMemset(d_hist, 0, sizeof(int)*n_vertices), "Memset d_hist");
+
+	//SIZE OF SHIT
+	//printf("\nSize(adj) =     %ld Bytes\nSize(adjsize) = %ld Bytes\nSize(hist) =    %ld Bytes\nSize(lcm) =     %ld Bytes", sizeof(int)*adjsizes[n_vertices], sizeof(int)*(n_vertices + 1), sizeof(int)*n_vertices, sizeof(int)*n_vertices*n_vertices);
+
 	//figures out threads per block
 	int threads;
 	if(n_vertices > 1024)
@@ -535,21 +559,398 @@ void TEST_PREP(igraph_t &graph) {
 	else
 		threads = n_vertices;
 
+	//kernel execution time crap
+	float elapsedTime;
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
+
 	//kernel call
-	TEST<<<n_vertices, threads>>>(d_adj, d_lcm, d_adjsizes, n_vertices);
+	OPT_1<<<n_vertices, threads>>>(d_adj, d_lcm, d_adjsizes, n_vertices);
+	checkCudaError(cudaGetLastError(), "Checking Last Error, Test Kernel Launch");
+	// printf("\nTEST\n");
+	//cudaDeviceSynchronize();
+	
+
+	//DEBUG
+	// int *lcm = (int*)malloc(sizeof(int)*n_vertices*n_vertices);
+	// cudaMemcpy(lcm, d_lcm, sizeof(int)*n_vertices*n_vertices, cudaMemcpyDeviceToHost);
+	// for(int i = 0; i < n_vertices; i++) {
+
+	// 	printf("\nv%d: ", i);
+	// 	for(int j = 0; j < n_vertices; j++) {
+
+	// 		printf("%d ", lcm[i*n_vertices + j]);
+	// 	}
+	// 	printf("\n");
+	// }
+	// for(int i = 0; i < n_vertices; i++) {
+
+	// 	int count = 0;
+
+	// 	for(int j = 0; j < n_vertices; j++) {
+
+	// 		bool equal = false;
+
+	// 		for(int k = 0; k < n_vertices; k++) {
+
+	// 			if(lcm[i*n_vertices + k] == lcm[j*n_vertices + k])
+	// 				equal = true;
+	// 			else {
+	// 				equal = false;
+	// 				break;
+	// 			}
+	// 		}
+
+	// 		if(equal)
+	// 			++count;
+	// 	}
+	// 	// if(countMax < count)
+	// 	// 		countMax = count;
+
+	// 	++hist[count];
+	// }
+
+
+	// histogram shit
+	
+	OPT_1_HIST<<<n_vertices, threads>>>(d_lcm, d_hist, n_vertices);
+
+	//kernel execution stop
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(start);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cudaEventDestroy(start);
+	cudaEventDestroy(stop);
+
+	checkCudaError(cudaGetLastError(), "Checking Last Error, Test Hist Launch");
+	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*n_vertices, cudaMemcpyDeviceToHost), "Memcpy d_hist to host");
+
+	//prints gpu histogram
+	printf("\nGPU TEST HISTOGRAM\n");
+	for(int i = 1; i < n_vertices; i++) {
+		if ((hist[i] / i) > 0)
+			printf("%d    %d\n", i, (hist[i] / i));
+	}
+
+	//prints kernel running time
+	printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
+	printf("\n******** Total Running Time of Kernel = %0.5f sec *******\n", elapsedTime/1000);
+
+	//frees everything
+	cudaFree(d_hist);
+	cudaFree(d_lcm);
+	cudaFree(d_adj);
+	cudaFree(d_adjsizes);
+	free(hist);
+	free(adj);
+	free(adjsizes);
 }	
 
-//kernal
-__global__ void TEST(int* adj, int* lcm, int* sizes, int n) {
+//OPTIMIZATION 1
+__global__ void OPT_1(int* adj, int* lcm, int* sizes, int n) {
+	
+	int vertex = blockIdx.x;
+	int vcomp = threadIdx.x;
+	int cval;
+
+	if(vertex < n && vcomp < n)
+	for(int i = vcomp; i < n; i += blockDim.x) {
+
+		if(vertex == i) {
+			lcm[vertex*n + i] = 0;
+			continue;
+		}
+
+		//resets count
+		cval = 0;
+
+		//for loop that goes through vertex neighbors
+		for(int j = 0; j < sizes[vertex + 1] - sizes[vertex]; j++) {
+
+			//loop compares to other vertex i/vcomp
+			for(int k = 0; k < sizes[i+1] - sizes[i]; k++) {
+
+				if(adj[sizes[vertex] + j] == adj[sizes[i] + k]) {
+
+					++cval;
+					break;
+				}
+			}
+		}
+
+		//puts in lcm
+		lcm[vertex*n + i] = cval;
+	}
+
+	//sorts vertex lcm once block is done
+	__syncthreads();
+	if(vcomp == 0 && vertex < n)
+		thrust::sort(thrust::device, &lcm[vertex*n], &lcm[vertex*n] + n);
+}
+
+__global__ void OPT_1_HIST(int* lcm, int* hist, int n) {
+
+	//
+	int vertex = blockIdx.x;
+	int vcomp = threadIdx.x;
+	bool equal;
+	
+	//
+	__shared__ int cval;
+
+	//
+	if(vcomp == 0)
+		cval = 0;
+	__syncthreads();
+
+	//
+	if(vertex < n && vcomp < n)
+	for(int i = vcomp; i < n; i += blockDim.x) {
+
+		if(vertex == i) {
+			atomicAdd(&cval, 1);
+			continue;
+		}
+		
+		equal = false;
+
+		for(int j = 0; j < n; j++) {
+
+			if(lcm[vertex*n + j] == lcm[i*n + j])
+				equal = true;
+			
+			else {
+				equal = false;
+				break;
+			}
+		}
+
+		if(equal)
+			atomicAdd(&cval, 1);
+	}
+
+	__syncthreads();
+	if(vertex < n && vcomp == 0 && cval > 0) {
+		atomicAdd(&hist[cval], 1);
+		//printf("\nv%d: %d\n", vertex, cval);
+	}
+}
+
+//OPTIMIZATION 2 KERNELS & PREP
+void OPT_2_PREP(igraph_t &graph) {
+
+	//num vertices
+	int n_vertices = igraph_vcount(&graph);
+
+	//1D adj list graphs and sizes
+	int *adj;
+	int *adjsizes = (int*)malloc(sizeof(int)*(n_vertices + 1));
+
+	//vector for single vertices adj list
+	igraph_vector_t neisVec;
+	igraph_vector_init(&neisVec, 0);
+
+	//gets each vertex's number of neighbors and total neighbors
+	adjsizes[0] = 0;
+	for(int i = 1; i <= n_vertices; i++) {
+
+		igraph_neighbors(&graph, &neisVec, i-1, OUTALL);
+		adjsizes[i] = igraph_vector_size(&neisVec) + adjsizes[i-1];
+
+	}
+
+	//creats jagged & flattened to 1D adj list	
+	adj = (int*)malloc(sizeof(int)*adjsizes[n_vertices]);
+
+	//creates 1d adj list
+	for(int i = 0; i < n_vertices; i++) {
+
+		//gets neighbors and number of neighbors
+		igraph_neighbors(&graph, &neisVec, i, OUTALL);
+
+		//loads in vertice i's adjancent neighbors
+		for(int j = 0; j < adjsizes[i+1] - adjsizes[i]; j++)
+			adj[adjsizes[i] + j] = (int)VECTOR(neisVec)[j];
+	}
+
+	//device vars
+	int *d_adj, *d_lcm, *d_adjsizes, *d_lcmsizes, *d_hist;
+
+	//histogram vars
+	int *hist;
+	hist = (int*)malloc(sizeof(int)*n_vertices);
+	memset(hist, 0, sizeof(int)*n_vertices);
+
+	//mallocs and copys
+	checkCudaError(cudaMalloc((void**)&d_adj, sizeof(int)*adjsizes[n_vertices]), "Malloc d_adj");
+	checkCudaError(cudaMalloc((void**)&d_adjsizes, sizeof(int)*(n_vertices+1)), "Malloc d_adjsizes");
+	checkCudaError(cudaMalloc((void**)&d_lcmsizes, sizeof(int)*(n_vertices+1)), "Malloc d_lcmsizes");
+	
+
+	//copys adj list to device and initializes lcm to zero
+	checkCudaError(cudaMemcpy(d_adj, adj, sizeof(int)*adjsizes[n_vertices], cudaMemcpyHostToDevice), "Memcpy d_adj");
+	checkCudaError(cudaMemcpy(d_adjsizes, adjsizes, sizeof(int)*(n_vertices+1), cudaMemcpyHostToDevice), "Memcpy d_adjsizes");
+	checkCudaError(cudaMemset(d_lcmsizes, 0, sizeof(int)*(n_vertices+1)), "Memset d_lcmsizes");
+
+	//device histogram stuff
+	checkCudaError(cudaMalloc((void**)&d_hist, sizeof(int)*n_vertices), "Malloc d_hist");
+	checkCudaError(cudaMemset(d_hist, 0, sizeof(int)*n_vertices), "Memset d_hist");
+
+	//SIZE OF SHIT
+	//printf("\nSize(adj) =     %ld Bytes\nSize(adjsize) = %ld Bytes\nSize(hist) =    %ld Bytes\nSize(lcm) =     %ld Bytes", sizeof(int)*adjsizes[n_vertices], sizeof(int)*(n_vertices + 1), sizeof(int)*n_vertices, sizeof(int)*n_vertices*n_vertices);
+
+	//figures out threads per block
+	int threads;
+	if(n_vertices > 1024)
+		threads = 1024;
+	else
+		threads = n_vertices;
+
+	//kernel execution time crap
+	float elapsedTime;
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
+
+	//lcm sizes kernel
+	OPT_2_SIZES<<<n_vertices, threads>>>(d_adj, d_lcmsizes, d_adjsizes, n_vertices);
+	int lcmsize;
+	checkCudaError(cudaMemcpy(&lcmsize, &d_lcmsizes[n_vertices], sizeof(int), cudaMemcpyDeviceToHost), "Memcpy lcmsize");
+	checkCudaError(cudaMalloc((void**)&d_lcm, sizeof(int)*lcmsize), "Malloc d_lcm");
+	checkCudaError(cudaMemset(d_lcm, 0, sizeof(int)*lcmsize), "Memset d_lcm");
+
+	//get lcm shit
+	OPT_2<<<n_vertices, threads>>>(d_adj, d_lcm, d_adjsizes, d_lcmsizes, n_vertices);
+
+	//histogram
+	OPT_2_HIST<<<n_vertices, threads>>>(d_lcm, d_hist, d_lcmsizes, n_vertices);
+	
+	//kernel execution stop
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(start);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cudaEventDestroy(start);
+	cudaEventDestroy(stop);
+
+	//copies hist back to host
+	checkCudaError(cudaMemcpy(hist, d_hist, sizeof(int)*n_vertices, cudaMemcpyDeviceToHost), "D_HIST TO HOST");
+
+	//prints gpu histogram
+	printf("\nGPU OPT 2 HISTOGRAM\n");
+	for(int i = 1; i < n_vertices; i++) {
+		if ((hist[i] / i) > 0)
+			printf("%d    %d\n", i, (hist[i] / i));
+	}
+
+	//prints kernel running time
+	printf("\n******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
+	printf("\n******** Total Running Time of Kernel = %0.5f sec *******\n", elapsedTime/1000);
+
+	//frees all the shit
+	free(adj);
+	free(hist);
+	free(adjsizes);
+	cudaFree(d_adj);
+	cudaFree(d_adjsizes);
+	cudaFree(d_hist);
+	cudaFree(d_lcm);
+	cudaFree(d_lcmsizes);
+}
+
+__global__ void OPT_2_SIZES(int* adj, int* lcmsizes, int* sizes, int n) {
 
 	int vertex = blockIdx.x;
 	int vcomp = threadIdx.x;
 	int cval;
 
+	if(vertex < n && vcomp < n)
 	for(int i = vcomp; i < n; i += blockDim.x) {
 
-		//for(int j = 0; j < )
+		//skips to next vertex
+		if(vertex == i) {
+			continue;
+		}
+
+		//resets count
+		cval = 0;
+
+		//for loop that goes through vertex neighbors
+		for(int j = 0; j < sizes[vertex + 1] - sizes[vertex]; j++) {
+
+			//loop compares to other vertex i/vcomp
+			for(int k = 0; k < sizes[i+1] - sizes[i]; k++) {
+
+				if(adj[sizes[vertex] + j] == adj[sizes[i] + k]) {
+
+					++cval;
+					break;
+				}
+			}
+
+			if(cval > 0)
+				break;
+		}
+
+		//adds to lcm size
+		if(cval > 0) {
+			atomicAdd(&lcmsizes[vertex + 1], 1);
+		}
 	}
 
-	//thrust::sort(thrust::seq, test, test + 13);
+	//sorts vertex lcm once block is done
+	// __syncthreads();
+	// if(vcomp == 0 && vertex < n)
+	// 	thrust::sort(thrust::device, &lcm[vertex*n], &lcm[vertex*n] + n);
+}
+
+__global__ void OPT_2(int* adj, int* lcm, int* sizes, int* lcmsizes, int n) {
+
+	int vertex = blockIdx.x;
+	int vcomp = threadIdx.x;
+	int cval;
+
+	if(vertex < n && vcomp < n)
+	for(int i = vcomp; i < n; i += blockDim.x) {
+
+		if(vertex == i) {
+			continue;
+		}
+
+		//resets count
+		cval = 0;
+
+		//for loop that goes through vertex neighbors
+		for(int j = 0; j < sizes[vertex + 1] - sizes[vertex]; j++) {
+
+			//loop compares to other vertex i/vcomp
+			for(int k = 0; k < sizes[i+1] - sizes[i]; k++) {
+
+				if(adj[sizes[vertex] + j] == adj[sizes[i] + k]) {
+
+					++cval;
+					break;
+				}
+			}
+		}
+
+		//puts in lcm
+		if(cval > 0) {
+			lcm[lcmsizes[vertex] + (i%n) % (lcmsizes[vertex+1] - lcmsizes[vertex])] = cval;
+		}
+	}
+
+	//sorts vertex lcm once block is done
+	__syncthreads();
+	if(vcomp == 0 && vertex < n)
+		thrust::sort(thrust::device, &lcm[lcmsizes[vertex]], &lcm[lcmsizes[vertex+1]]);
+}
+
+__global__ void OPT_2_HIST(int* lcm, int* hist, int* lcmsizes, int n) {
+
+	//
 }
